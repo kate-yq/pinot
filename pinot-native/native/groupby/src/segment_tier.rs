@@ -121,8 +121,28 @@ impl SegmentTierDriver {
     /// 64 bits (`BitPackedHash` is `i64`-only for now) — the caller falls back to
     /// Java.
     pub fn new(cardinalities: &[i32], agg_kinds: &[AggKind]) -> Option<Self> {
+        Self::build_for_tier(cardinalities, agg_kinds, select_tier(cardinalities))
+    }
+
+    /// Build a driver for an **explicitly chosen** tier, bypassing [`select_tier`].
+    /// Intended for benchmarks and tier-parity tests that need to run the *same*
+    /// key data through a specific tier's key table; production code must use
+    /// [`new`], which selects the correct tier for the shape.
+    ///
+    /// The caller is responsible for choosing a tier the shape can actually back:
+    /// the dense tiers allocate a slot array sized to the key domain
+    /// (`2^Σbits` for [`Tier::BitPackedDirect`], `∏ Cᵢ` for [`Tier::RadixDirect`]),
+    /// so forcing a dense tier on a high-cardinality shape can allocate a huge
+    /// array. Returns `None` when the packed key would exceed 64 bits.
+    ///
+    /// [`new`]: SegmentTierDriver::new
+    pub fn new_for_tier(cardinalities: &[i32], agg_kinds: &[AggKind], tier: Tier) -> Option<Self> {
+        Self::build_for_tier(cardinalities, agg_kinds, tier)
+    }
+
+    fn build_for_tier(cardinalities: &[i32], agg_kinds: &[AggKind], tier: Tier) -> Option<Self> {
         let single = cardinalities.len() == 1;
-        let inner = match select_tier(cardinalities) {
+        let inner = match tier {
             // --- Single column: dict-id is the key, no encoder / packing -------
             Tier::BitPackedDirect if single => {
                 let cap = (cardinalities[0].max(1)) as usize;
@@ -416,6 +436,64 @@ mod tests {
     fn bit_packed_hash_end_to_end() {
         // [40000,60]: Σbits 22, product 2.4M -> T2.
         run_e2e(&[40_000, 60], Tier::BitPackedHash, 40_000, 0x9999_aaaa_bbbb_cccc);
+    }
+
+    /// `new_for_tier` forces a tier, bypassing `select_tier`. For a shape small
+    /// enough to back all three tiers (`Σbits <= 20`), the dense-direct, radix,
+    /// and hash tiers must all produce byte-identical groups from the same data —
+    /// the invariant the tier-vs-tier benchmark relies on. Guards against a tier
+    /// building wrong groups for an otherwise-eligible shape.
+    #[test]
+    fn forced_tiers_produce_identical_groups() {
+        let cards = [256, 256]; // Σbits = 16 <= 20 -> constructible in T1, T0, T2.
+        let kinds = [AggKind::SumLongToDouble, AggKind::Count];
+        let n = 20_000;
+
+        // Deterministic column-major block + reference values.
+        let num_columns = cards.len();
+        let mut flat = vec![0i32; num_columns * n];
+        let mut values = vec![0i64; n];
+        let mut state: u64 = 0xfeed_face_dead_beef;
+        for row in 0..n {
+            for (c, &card) in cards.iter().enumerate() {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                flat[c * n + row] = ((state >> 33) as i32).rem_euclid(card);
+            }
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            values[row] = ((state >> 5) as i64) % 1_000_000;
+        }
+
+        // Build a canonical (key -> (sum,count)) map from a forced tier.
+        fn run(cards: &[i32], kinds: &[AggKind], tier: Tier, flat: &[i32], values: &[i64], n: usize)
+            -> std::collections::HashMap<Vec<i32>, (f64, i64)> {
+            let mut driver = SegmentTierDriver::new_for_tier(cards, kinds, tier)
+                .expect("forced tier constructible");
+            assert_eq!(driver.tier(), tier);
+            driver.feed_block(flat, cards.len(), n);
+            driver.apply_long(0, values);
+            driver.apply_count(1);
+            let groups = driver.num_groups();
+            let mut out = vec![0i32; cards.len() * groups];
+            driver.extract_keys(&mut out, cards.len());
+            let sums = driver.agg_state(0).as_double_slice().unwrap();
+            let cnts = driver.agg_state(1).as_long_slice().unwrap();
+            let mut map = std::collections::HashMap::with_capacity(groups);
+            for g in 0..groups {
+                let key: Vec<i32> = (0..cards.len()).map(|c| out[c * groups + g]).collect();
+                map.insert(key, (sums[g], cnts[g]));
+            }
+            map
+        }
+
+        let t1 = run(&cards, &kinds, Tier::BitPackedDirect, &flat, &values, n);
+        let t0 = run(&cards, &kinds, Tier::RadixDirect, &flat, &values, n);
+        let t2 = run(&cards, &kinds, Tier::BitPackedHash, &flat, &values, n);
+        assert_eq!(t1, t0, "T1 (direct) vs T0 (radix) groups differ");
+        assert_eq!(t1, t2, "T1 (direct) vs T2 (hash) groups differ");
     }
 
     #[test]
