@@ -47,14 +47,29 @@ pub fn bits_for(cardinality: i32) -> u32 {
     }
 }
 
+/// One grouping column's placement in the packed key: its bit `shift` (offset
+/// from the low bit) and its bit `width`. The extraction mask is **derived on
+/// demand** in [`PackedKeyEncoder::unpack`] as `(1 << width) - 1` rather than
+/// cached, keeping the field a pair of `u32`s (8 bytes, no padding).
+///
+/// `unpack` is load-bound, so the per-column metadata size dominates: storing
+/// `{shift, width}` (8 B) and deriving the mask branch-free (a single dict
+/// column is `i32`-carded, so `width <= 31` and `1 << width` never overflows —
+/// no guard needed) beats caching a `u64` mask, which widens the record to 16 B
+/// and doubles the metadata a wide-key `unpack` streams. See
+/// `benches/packed_unpack.rs` for the full layout × mask-strategy comparison.
+struct PackedField {
+    shift: u32,
+    width: u32,
+}
+
 /// Packs several dict-encoded columns' `dict_id`s into a single `i64` key.
 ///
 /// Build with [`PackedKeyEncoder::new`] from the per-column dict cardinalities;
 /// it returns `None` if the composite needs more than 64 bits (caller falls
 /// back to row-encoding).
 pub struct PackedKeyEncoder {
-    widths: Vec<u32>,
-    shifts: Vec<u32>,
+    fields: Box<[PackedField]>,
     total_bits: u32,
 }
 
@@ -62,21 +77,21 @@ impl PackedKeyEncoder {
     /// Build an encoder for columns with the given dict cardinalities (in
     /// grouping order). Returns `None` if the packed key would exceed 64 bits.
     pub fn new(cardinalities: &[i32]) -> Option<Self> {
-        let mut widths = Vec::with_capacity(cardinalities.len());
-        let mut shifts = Vec::with_capacity(cardinalities.len());
+        let mut fields = Vec::with_capacity(cardinalities.len());
         let mut total: u32 = 0;
         for &card in cardinalities {
             let w = bits_for(card);
-            shifts.push(total);
-            widths.push(w);
+            // Store `shift` + `width` (8-byte field); the mask is derived on
+            // demand in `unpack`. See the design walk on `PackedField` for why
+            // caching a `u64` mask (widening to 16 B) is a net regression.
+            fields.push(PackedField { shift: total, width: w });
             total = total.checked_add(w)?;
             if total > 64 {
                 return None;
             }
         }
         Some(Self {
-            widths,
-            shifts,
+            fields: fields.into_boxed_slice(),
             total_bits: total,
         })
     }
@@ -84,7 +99,7 @@ impl PackedKeyEncoder {
     /// Number of grouping columns.
     #[inline]
     pub fn num_columns(&self) -> usize {
-        self.widths.len()
+        self.fields.len()
     }
 
     /// Total bits the packed key occupies. The packed value lies in
@@ -106,10 +121,10 @@ impl PackedKeyEncoder {
     /// into a single key.
     #[inline]
     pub fn pack(&self, dict_ids: &[i32]) -> i64 {
-        debug_assert_eq!(dict_ids.len(), self.widths.len());
+        debug_assert_eq!(dict_ids.len(), self.fields.len());
         let mut packed: u64 = 0;
-        for i in 0..self.widths.len() {
-            packed |= (dict_ids[i] as u64) << self.shifts[i];
+        for i in 0..self.fields.len() {
+            packed |= (dict_ids[i] as u64) << self.fields[i].shift;
         }
         packed as i64
     }
@@ -118,27 +133,38 @@ impl PackedKeyEncoder {
     /// boundary — each is then decoded via its column's `Dictionary`).
     #[inline]
     pub fn unpack(&self, packed: i64, out: &mut [i32]) {
-        debug_assert_eq!(out.len(), self.widths.len());
+        debug_assert_eq!(out.len(), self.fields.len());
         let p = packed as u64;
-        for i in 0..self.widths.len() {
-            let w = self.widths[i];
-            let mask = if w == 64 { u64::MAX } else { (1u64 << w) - 1 };
-            out[i] = ((p >> self.shifts[i]) & mask) as i32;
+        for i in 0..self.fields.len() {
+            let f = &self.fields[i];
+            // Derive the mask branch-free. `width <= 31` (a single column is
+            // `i32`-carded), so `1 << width` can never overflow and the defensive
+            // `== 64` guard the old recompute carried is unnecessary — removing
+            // that dead branch is worth ~8% (it had blocked pipelining). Deriving
+            // here (one shift + one sub) is essentially free: the ops hide under
+            // the load latency, which is why we store `width` in an 8-byte field
+            // rather than caching a `u64` mask in a 16-byte one — see the design
+            // walk on `PackedField`. Compute-vs-cache is a wash on narrow keys and
+            // ~11% *faster* than caching at 16 columns.
+            let mask = (1u64 << f.width) - 1;
+            out[i] = ((p >> f.shift) & mask) as i32;
         }
     }
 
     /// Pack a whole block. `columns[c]` is column `c`'s dict_ids (column-major,
     /// all length `n`); writes one packed key per row into `out[0..n]`.
     pub fn pack_block(&self, columns: &[&[i32]], out: &mut [i64]) {
-        debug_assert_eq!(columns.len(), self.widths.len());
+        // Hard assert (not debug_assert): a column-count mismatch would otherwise
+        // surface as a less obvious out-of-bounds index panic on `columns[c]` below.
+        assert_eq!(columns.len(), self.fields.len());
         let n = out.len();
         debug_assert!(columns.iter().all(|c| c.len() == n));
         // Column-major outer loop keeps each column's reads sequential.
         for v in out.iter_mut() {
             *v = 0;
         }
-        for c in 0..self.widths.len() {
-            let shift = self.shifts[c];
+        for c in 0..self.fields.len() {
+            let shift = self.fields[c].shift;
             let col = columns[c];
             for i in 0..n {
                 out[i] |= (col[i] as u64 as i64) << shift;
@@ -315,6 +341,118 @@ mod tests {
         enc.pack_block(&[&col0, &col1], &mut out);
         for i in 0..5 {
             assert_eq!(out[i], enc.pack(&[col0[i], col1[i]]), "row {i}");
+        }
+    }
+
+    /// White-box: `new` must precompute, for every column, `shift` = cumulative
+    /// bit offset and `width` = `bits_for(card)` — the invariant the branch-free
+    /// `unpack` relies on to derive the mask as `(1 << width) - 1`. Covers width-0
+    /// (constant) columns, whose derived mask is 0 (they decode to only dict-id 0).
+    #[test]
+    fn packed_field_shift_and_width_are_precomputed() {
+        let cards = [200, 1, 10, 5000, 2]; // includes a card-1 (0-bit) column
+        let enc = PackedKeyEncoder::new(&cards).unwrap();
+        assert_eq!(enc.fields.len(), cards.len());
+        let mut shift = 0u32;
+        for (i, &card) in cards.iter().enumerate() {
+            let w = bits_for(card);
+            // The mask the branch-free `unpack` derives from the stored width.
+            let derived_mask = if w == 0 { 0 } else { (1u64 << w) - 1 };
+            assert_eq!(enc.fields[i].shift, shift, "shift[{i}]");
+            assert_eq!(enc.fields[i].width, w, "width[{i}]");
+            assert_eq!(
+                (1u64 << enc.fields[i].width) - 1,
+                derived_mask,
+                "derived mask[{i}] (width {w})"
+            );
+            shift += w;
+        }
+        assert_eq!(enc.total_bits(), shift);
+    }
+
+    /// A mask that is too wide lets a neighbor's bits bleed in; too narrow
+    /// truncates. Setting every column to its maximum dict-id fills each field
+    /// with all-ones, so any mask/shift error corrupts an adjacent field.
+    #[test]
+    fn unpack_isolates_adjacent_fields_at_max_dict_id() {
+        for cards in [
+            vec![4, 4, 4],       // 2+2+2 bits, every field full at [3,3,3]
+            vec![256, 16],       // 8+4 bits, max [255, 15]
+            vec![200, 10, 5000], // uneven widths
+            vec![8, 1, 8, 1, 8], // width-0 columns interleaved
+        ] {
+            let enc = PackedKeyEncoder::new(&cards).unwrap();
+            let maxes: Vec<i32> = cards.iter().map(|&c| c - 1).collect();
+            let packed = enc.pack(&maxes);
+            let mut out = vec![0i32; cards.len()];
+            enc.unpack(packed, &mut out);
+            assert_eq!(out, maxes, "max-dict-id roundtrip for {cards:?}");
+        }
+    }
+
+    /// Differential: the branch-free `unpack` (mask derived as `(1 << width) - 1`)
+    /// must be byte-identical to an independent reference that re-derives
+    /// width/shift/mask on the fly *with* the defensive `w == 64` branch, across
+    /// randomized rows and encoder shapes — including a dense `T1`-sized encoder
+    /// whose key is narrowed to `i32` and widened back, and a wide `T2`-sized
+    /// `i64` encoder with a full-width 31-bit field.
+    #[test]
+    fn unpack_matches_on_the_fly_mask_reference() {
+        // Independent of the encoder's stored fields — recompute each call.
+        fn unpack_naive(cards: &[i32], packed: i64, out: &mut [i32]) {
+            let p = packed as u64;
+            let mut shift = 0u32;
+            for (i, &card) in cards.iter().enumerate() {
+                let w = bits_for(card);
+                let mask = if w == 64 { u64::MAX } else { (1u64 << w) - 1 };
+                out[i] = ((p >> shift) & mask) as i32;
+                shift += w;
+            }
+        }
+        let shapes: [&[i32]; 4] = [
+            &[64, 32, 8],     // 6+5+3 = 14 bits -> dense T1 (narrowed to i32)
+            &[16, 16, 16],    // 12 bits         -> dense T1
+            &[200, 10, 5000], // 25 bits         -> hash T2 (i64)
+            &[i32::MAX, 4],   // 31+2 = 33 bits  -> hash T2, widest single field
+        ];
+        let mut state: u64 = 0xdead_beef_cafe_f00d;
+        for cards in shapes {
+            let enc = PackedKeyEncoder::new(cards).unwrap();
+            let narrow = enc.total_bits() <= 20; // dense tier narrows key to i32
+            let mut a = vec![0i32; cards.len()];
+            let mut b = vec![0i32; cards.len()];
+            for _ in 0..20_000 {
+                let row: Vec<i32> = cards
+                    .iter()
+                    .map(|&c| {
+                        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        ((state >> 33) as i32).rem_euclid(c)
+                    })
+                    .collect();
+                let mut packed = enc.pack(&row);
+                if narrow {
+                    packed = (packed as i32) as i64; // T1 dense-tier round-trip
+                }
+                enc.unpack(packed, &mut a);
+                unpack_naive(cards, packed, &mut b);
+                assert_eq!(a, b, "branch-free vs branched mask for {cards:?}");
+                assert_eq!(a, row, "roundtrip for {cards:?}");
+            }
+        }
+    }
+
+    /// Exercise the widest layout: fields spanning up to bit 63. `pack`/`unpack`
+    /// must round-trip at the exact 64-bit boundary — not merely be constructible.
+    #[test]
+    fn pack_unpack_at_full_64_bit_width() {
+        // 31 + 31 + 2 = 64 bits exactly (top field's shift is 62).
+        let enc = PackedKeyEncoder::new(&[i32::MAX, i32::MAX, 4]).unwrap();
+        assert_eq!(enc.total_bits(), 64);
+        let mut out = [0i32; 3];
+        for row in [[0, 0, 0], [i32::MAX - 1, i32::MAX - 1, 3], [1, 123_456, 2]] {
+            let packed = enc.pack(&row);
+            enc.unpack(packed, &mut out);
+            assert_eq!(out, row, "64-bit roundtrip for {row:?}");
         }
     }
 

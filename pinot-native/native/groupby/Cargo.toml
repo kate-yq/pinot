@@ -42,5 +42,9 @@ criterion = "0.5"
 name = "segment_tier_hash"
 harness = false
 
+[[bench]]
+name = "packed_unpack"
+harness = false
+
 [lints]
 workspace = true
