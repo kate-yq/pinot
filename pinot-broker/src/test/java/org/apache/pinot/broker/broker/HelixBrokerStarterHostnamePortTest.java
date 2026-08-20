@@ -19,6 +19,7 @@
 package org.apache.pinot.broker.broker;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.pinot.broker.broker.helix.HelixBrokerStarter;
@@ -31,6 +32,7 @@ import org.testng.annotations.Test;
 
 import static org.apache.pinot.spi.utils.CommonConstants.Broker.CONFIG_OF_BROKER_HOSTNAME;
 import static org.apache.pinot.spi.utils.CommonConstants.Broker.CONFIG_OF_BROKER_ID;
+import static org.apache.pinot.spi.utils.CommonConstants.Broker.CONFIG_OF_BROKER_INSTANCE_TAGS;
 import static org.apache.pinot.spi.utils.CommonConstants.Broker.CONFIG_OF_DELAY_SHUTDOWN_TIME_MS;
 import static org.apache.pinot.spi.utils.CommonConstants.Helix.CONFIG_OF_CLUSTER_NAME;
 import static org.apache.pinot.spi.utils.CommonConstants.Helix.CONFIG_OF_ZOOKEEPR_SERVER;
@@ -136,6 +138,50 @@ public class HelixBrokerStarterHostnamePortTest extends ControllerTest {
     assertEquals(instanceConfig.getPort(), "1234");
 
     brokerStarter.stop();
+  }
+
+  @Test
+  public void testConfiguredTagsReplaceExistingTags()
+      throws Exception {
+    String instanceId = "Broker_tagMismatch";
+    HelixBrokerStarter brokerStarter = startBroker(instanceId, 1235, "oldTenant_BROKER");
+    brokerStarter.stop();
+
+    brokerStarter = startBroker(instanceId, 1235, "newTenant_BROKER");
+    InstanceConfig instanceConfig = HelixHelper.getInstanceConfig(_helixManager, instanceId);
+    assertEquals(instanceConfig.getTags(), List.of("newTenant_BROKER"));
+    brokerStarter.stop();
+  }
+
+  @Test
+  public void testExistingTagsPreservedWithoutConfiguredTags()
+      throws Exception {
+    String instanceId = "Broker_tagPreserved";
+    HelixBrokerStarter brokerStarter = startBroker(instanceId, 1236, "existingTenant_BROKER");
+    brokerStarter.stop();
+
+    brokerStarter = startBroker(instanceId, 1236, null);
+    InstanceConfig instanceConfig = HelixHelper.getInstanceConfig(_helixManager, instanceId);
+    assertEquals(instanceConfig.getTags(), List.of("existingTenant_BROKER"));
+    brokerStarter.stop();
+  }
+
+  private HelixBrokerStarter startBroker(String instanceId, int port, String tags)
+      throws Exception {
+    Map<String, Object> properties = new HashMap<>();
+    properties.put(CONFIG_OF_ZOOKEEPR_SERVER, getZkUrl());
+    properties.put(CONFIG_OF_CLUSTER_NAME, getHelixClusterName());
+    properties.put(CONFIG_OF_BROKER_ID, instanceId);
+    properties.put(CONFIG_OF_BROKER_HOSTNAME, "myHost");
+    properties.put(KEY_OF_BROKER_QUERY_PORT, port);
+    properties.put(CONFIG_OF_DELAY_SHUTDOWN_TIME_MS, 0);
+    if (tags != null) {
+      properties.put(CONFIG_OF_BROKER_INSTANCE_TAGS, tags);
+    }
+    HelixBrokerStarter brokerStarter = new HelixBrokerStarter();
+    brokerStarter.init(new PinotConfiguration(properties));
+    brokerStarter.start();
+    return brokerStarter;
   }
 
   @AfterClass

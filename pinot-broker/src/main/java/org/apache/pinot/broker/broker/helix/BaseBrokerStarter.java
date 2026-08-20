@@ -26,8 +26,11 @@ import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.helix.HelixAdmin;
@@ -136,6 +139,7 @@ public abstract class BaseBrokerStarter implements ServiceStartable {
   protected final List<ClusterChangeHandler> _externalViewChangeHandlers = new ArrayList<>();
   protected final List<ClusterChangeHandler> _instanceConfigChangeHandlers = new ArrayList<>();
   protected final List<ClusterChangeHandler> _liveInstanceChangeHandlers = new ArrayList<>();
+  protected final List<BrokerRoutingLifecycleListener> _brokerRoutingLifecycleListeners = new ArrayList<>();
   // Spectator Helix manager handles the custom change listeners, properties read/write
   protected HelixManager _spectatorHelixManager;
   protected HelixAdmin _helixAdmin;
@@ -268,6 +272,16 @@ public abstract class BaseBrokerStarter implements ServiceStartable {
    */
   public void addLiveInstanceChangeHandler(ClusterChangeHandler liveInstanceChangeHandler) {
     _liveInstanceChangeHandlers.add(liveInstanceChangeHandler);
+  }
+
+  /**
+   * Adds a listener for broker routing lifecycle events.
+   *
+   * <p>NOTE: listeners run synchronously on the Helix state transition thread. A listener exception aborts the state
+   * transition before routing is removed.
+   */
+  public void addBrokerRoutingLifecycleListener(BrokerRoutingLifecycleListener brokerRoutingLifecycleListener) {
+    _brokerRoutingLifecycleListeners.add(brokerRoutingLifecycleListener);
   }
 
   @Override
@@ -513,7 +527,7 @@ public abstract class BaseBrokerStarter implements ServiceStartable {
     _participantHelixManager.getStateMachineEngine()
         .registerStateModelFactory(BrokerResourceOnlineOfflineStateModelFactory.getStateModelDef(),
             new BrokerResourceOnlineOfflineStateModelFactory(_propertyStore, _helixDataAccessor, _routingManager,
-                _queryQuotaManager));
+                _queryQuotaManager, _brokerRoutingLifecycleListeners));
     // Register user-define message handler factory
     _participantHelixManager.getMessagingService()
         .registerMessageHandlerFactory(Message.MessageType.USER_DEFINE_MSG.toString(),
@@ -595,18 +609,28 @@ public abstract class BaseBrokerStarter implements ServiceStartable {
     updated |= HelixHelper.removeDisabledPartitions(instanceConfig);
     boolean shouldUpdateBrokerResource = false;
     List<String> instanceTags = instanceConfig.getTags();
-    if (instanceTags.isEmpty()) {
-      // This is a new broker (first time joining the cluster). We allow configuring initial broker tags regardless of
-      // tenant isolation mode since it defaults to true and is relatively obscure.
-      String instanceTagsConfig = _brokerConf.getProperty(Broker.CONFIG_OF_BROKER_INSTANCE_TAGS);
-      if (StringUtils.isNotEmpty(instanceTagsConfig)) {
-        for (String instanceTag : StringUtils.split(instanceTagsConfig, ',')) {
-          Preconditions.checkArgument(TagNameUtils.isBrokerTag(instanceTag), "Illegal broker instance tag: %s",
-                  instanceTag);
-          instanceConfig.addTag(instanceTag);
+    List<String> previousInstanceTags = new ArrayList<>(instanceTags);
+    String instanceTagsConfig = _brokerConf.getProperty(Broker.CONFIG_OF_BROKER_INSTANCE_TAGS);
+    if (StringUtils.isNotEmpty(instanceTagsConfig)) {
+      Set<String> configuredInstanceTags = new LinkedHashSet<>();
+      for (String instanceTag : StringUtils.split(instanceTagsConfig, ',')) {
+        String trimmedInstanceTag = instanceTag.trim();
+        Preconditions.checkArgument(TagNameUtils.isBrokerTag(trimmedInstanceTag),
+            "Illegal broker instance tag: %s", trimmedInstanceTag);
+        configuredInstanceTags.add(trimmedInstanceTag);
+      }
+      if (!configuredInstanceTags.equals(new HashSet<>(instanceTags))) {
+        instanceTags.clear();
+        for (String configuredInstanceTag : configuredInstanceTags) {
+          instanceConfig.addTag(configuredInstanceTag);
         }
+        instanceTags = instanceConfig.getTags();
+        updated = true;
         shouldUpdateBrokerResource = true;
-      } else if (ZKMetadataProvider.getClusterTenantIsolationEnabled(_propertyStore)) {
+      }
+    } else if (instanceTags.isEmpty()) {
+      // This is a new broker (first time joining the cluster).
+      if (ZKMetadataProvider.getClusterTenantIsolationEnabled(_propertyStore)) {
         instanceConfig.addTag(TagNameUtils.getBrokerTagForTenant(null));
         shouldUpdateBrokerResource = true;
       } else {
@@ -620,12 +644,15 @@ public abstract class BaseBrokerStarter implements ServiceStartable {
       HelixHelper.updateInstanceConfig(_participantHelixManager, instanceConfig);
     }
     if (shouldUpdateBrokerResource) {
-      // Update broker resource to include the new broker
       long startTimeMs = System.currentTimeMillis();
       List<String> tablesAdded = new ArrayList<>();
-      HelixHelper.updateBrokerResource(_participantHelixManager, _instanceId, instanceTags, tablesAdded, null);
-      LOGGER.info("Updated broker resource for new joining broker: {} with instance tags: {} in {}ms, tables added: {}",
-          _instanceId, instanceTags, System.currentTimeMillis() - startTimeMs, tablesAdded);
+      List<String> tablesRemoved = new ArrayList<>();
+      HelixHelper.updateBrokerResource(_participantHelixManager, _instanceId, instanceTags, tablesAdded, tablesRemoved);
+      LOGGER.info(
+          "Updated broker resource for broker: {} from instance tags: {} to instance tags: {} in {}ms, "
+              + "tables added: {}, tables removed: {}",
+          _instanceId, previousInstanceTags, instanceTags, System.currentTimeMillis() - startTimeMs, tablesAdded,
+          tablesRemoved);
     }
   }
 
