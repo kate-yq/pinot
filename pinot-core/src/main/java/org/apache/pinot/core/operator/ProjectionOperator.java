@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.core.operator;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.CaseFormat;
 import java.util.Collections;
 import java.util.HashMap;
@@ -116,6 +117,11 @@ public class ProjectionOperator extends BaseProjectOperator<ProjectionBlock> imp
   @Override
   public ExecutionStatistics getExecutionStatistics() {
     return _docIdSetOperator != null ? _docIdSetOperator.getExecutionStatistics() : new ExecutionStatistics(0, 0, 0, 0);
+  }
+
+  @VisibleForTesting
+  public boolean hasCachedData() {
+    return _dataBlockCache.hasCachedData();
   }
 
   @Override

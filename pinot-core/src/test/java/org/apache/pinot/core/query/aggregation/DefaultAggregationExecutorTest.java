@@ -24,15 +24,24 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.common.request.context.ExpressionContext;
+import org.apache.pinot.core.common.Operator;
 import org.apache.pinot.core.operator.DocIdSetOperator;
 import org.apache.pinot.core.operator.ProjectionOperator;
 import org.apache.pinot.core.operator.blocks.TransformBlock;
+import org.apache.pinot.core.operator.blocks.results.AggregationResultsBlock;
+import org.apache.pinot.core.operator.blocks.results.BaseResultsBlock;
+import org.apache.pinot.core.operator.combine.AggregationCombineOperator;
 import org.apache.pinot.core.operator.filter.MatchAllFilterOperator;
+import org.apache.pinot.core.operator.query.AggregationOperator;
 import org.apache.pinot.core.operator.transform.TransformOperator;
 import org.apache.pinot.core.plan.DocIdSetPlanNode;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
+import org.apache.pinot.core.query.aggregation.function.AggregationFunctionUtils.AggregationInfo;
 import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.core.query.request.context.utils.QueryContextConverterUtils;
 import org.apache.pinot.segment.local.indexsegment.immutable.ImmutableSegmentLoader;
@@ -143,6 +152,55 @@ public class DefaultAggregationExecutorTest {
       Assert.assertEquals(actual, expected,
           "Aggregation mis-match for function " + AGGREGATION_FUNCTIONS[i] + ", Expected: " + expected + " Actual: "
               + actual);
+    }
+  }
+
+  @Test
+  void testCachedDataReleasedAfterEachSegment() {
+    int numSegments = 3;
+    int totalDocs = _indexSegment.getSegmentMetadata().getTotalDocs();
+    AggregationFunction[] aggregationFunctions = _queryContext.getAggregationFunctions();
+    assert aggregationFunctions != null;
+    AtomicInteger numSegmentCachesReleased = new AtomicInteger();
+    List<Operator> segmentOperators = new ArrayList<>(numSegments);
+    for (int i = 0; i < numSegments; i++) {
+      Map<String, DataSource> dataSourceMap = new HashMap<>();
+      for (String column : _indexSegment.getPhysicalColumnNames()) {
+        dataSourceMap.put(column, _indexSegment.getDataSource(column));
+      }
+      MatchAllFilterOperator filterOperator = new MatchAllFilterOperator(totalDocs);
+      DocIdSetOperator docIdSetOperator = new DocIdSetOperator(filterOperator, DocIdSetPlanNode.MAX_DOC_PER_CALL);
+      ProjectionOperator projectionOperator = new ProjectionOperator(dataSourceMap, docIdSetOperator);
+      AggregationInfo aggregationInfo = new AggregationInfo(aggregationFunctions, projectionOperator, false);
+      segmentOperators.add(new AggregationOperator(_queryContext, aggregationInfo, totalDocs) {
+        @Override
+        protected AggregationResultsBlock getNextBlock() {
+          AggregationResultsBlock resultsBlock = super.getNextBlock();
+          Assert.assertFalse(projectionOperator.hasCachedData(),
+              "Projection cache should be released when the segment finishes");
+          numSegmentCachesReleased.incrementAndGet();
+          return resultsBlock;
+        }
+      });
+    }
+
+    _queryContext.setEndTimeMs(System.currentTimeMillis() + 10_000);
+    _queryContext.setMaxExecutionThreads(1);
+    ExecutorService executorService = Executors.newSingleThreadExecutor();
+    try {
+      BaseResultsBlock resultsBlock =
+          new AggregationCombineOperator(segmentOperators, _queryContext, executorService).nextBlock();
+      Assert.assertTrue(resultsBlock instanceof AggregationResultsBlock,
+          String.valueOf(resultsBlock.getErrorMessages()));
+      Assert.assertEquals(numSegmentCachesReleased.get(), numSegments);
+
+      List<Object> results = ((AggregationResultsBlock) resultsBlock).getResults();
+      double expectedSum = numSegments * computeSum(_inputData[0]);
+      Assert.assertEquals((double) results.get(0), expectedSum, expectedSum * 1e-12);
+      Assert.assertEquals((double) results.get(1), computeMax(_inputData[1]));
+      Assert.assertEquals((double) results.get(2), computeMin(_inputData[2]));
+    } finally {
+      executorService.shutdownNow();
     }
   }
 

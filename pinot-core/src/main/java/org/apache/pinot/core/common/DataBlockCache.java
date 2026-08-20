@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.core.common;
 
+import com.google.common.annotations.VisibleForTesting;
 import java.math.BigDecimal;
 import java.util.EnumMap;
 import java.util.HashMap;
@@ -64,9 +65,7 @@ public class DataBlockCache implements AutoCloseable {
   public void initNewBlock(int[] docIds, int length) {
     _docIds = docIds;
     if (length > _length) {
-      _dictIdsMap.clear();
-      _valuesMap.clear();
-      _numValuesMap.clear();
+      clearCachedData();
     }
     _length = length;
     _columnDictIdLoaded.clear();
@@ -424,8 +423,21 @@ public class DataBlockCache implements AutoCloseable {
     _valuesMap.get(dataType).put(column, values);
   }
 
+  private void clearCachedData() {
+    _dictIdsMap.clear();
+    _valuesMap.clear();
+    _numValuesMap.clear();
+  }
+
   public void addDataSource(String fullColumnKeyName, DataSource keyDataSource) {
     _dataFetcher.addDataSource(fullColumnKeyName, keyDataSource);
+  }
+
+  @VisibleForTesting
+  public boolean hasCachedData() {
+    return _docIds != null || _length != 0 || !_columnDictIdLoaded.isEmpty() || !_columnValueLoaded.isEmpty()
+        || !_columnNumValuesLoaded.isEmpty() || !_dictIdsMap.isEmpty() || !_valuesMap.isEmpty()
+        || !_numValuesMap.isEmpty();
   }
 
   /**
@@ -433,6 +445,12 @@ public class DataBlockCache implements AutoCloseable {
    */
   @Override
   public void close() {
+    clearCachedData();
+    _columnDictIdLoaded.clear();
+    _columnValueLoaded.clear();
+    _columnNumValuesLoaded.clear();
+    _docIds = null;
+    _length = 0;
     _dataFetcher.close();
   }
 }
