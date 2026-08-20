@@ -22,9 +22,16 @@ import com.google.common.cache.LoadingCache;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import org.apache.pinot.common.metrics.ServerGauge;
 import org.apache.pinot.common.metrics.ServerMetrics;
@@ -330,6 +337,55 @@ public class RealtimeConsumptionRateManagerTest {
     int ratio = metricEmitter.emitMetric(1024, 1000.0, minute2);
     // 2048 bytes in 60 seconds = 34.13 bytes/sec → 34.13 / 1000 * 100 ≈ 3%
     assertEquals(ratio, (int) Math.round(2048.0 / 60.0 / 1000.0 * 100));
+  }
+
+  /**
+   * The server-wide rate limiter shares a single {@link MetricEmitter} across all partition consumer threads.
+   * This verifies that concurrent per-minute aggregation does not lose counts. Without thread-safety, the
+   * unsynchronized read-modify-write of the aggregate loses updates and the emitted utilization is under-reported.
+   */
+  @Test
+  public void testMetricEmitterIsThreadSafeUnderConcurrentAggregation()
+      throws Exception {
+    int numThreads = 16;
+    int iterationsPerThread = 100_000;
+    long expectedTotal = (long) numThreads * iterationsPerThread;
+
+    MetricEmitter metricEmitter =
+        new MetricEmitter(null, "thread-safety-test", ServerGauge.CONSUMPTION_QUOTA_UTILIZATION);
+
+    // All increments target the same minute so every call takes the accumulate path (_aggregateCount += count).
+    // The rate limit value is irrelevant here; the test reads the aggregated count directly via getAggregateCount().
+    Instant sameMinute = Clock.fixed(Instant.parse("2022-08-10T12:00:30Z"), ZoneOffset.UTC).instant();
+    double rateLimit = 1000.0;
+
+    ExecutorService executor = Executors.newFixedThreadPool(numThreads);
+    try {
+      CountDownLatch startLatch = new CountDownLatch(1);
+      List<Future<?>> futures = new ArrayList<>(numThreads);
+      for (int t = 0; t < numThreads; t++) {
+        futures.add(executor.submit((Callable<Void>) () -> {
+          startLatch.await();
+          for (int i = 0; i < iterationsPerThread; i++) {
+            metricEmitter.emitMetric(1, rateLimit, sameMinute);
+          }
+          return null;
+        }));
+      }
+      // Release all threads at once to maximize contention.
+      startLatch.countDown();
+      for (Future<?> future : futures) {
+        future.get();
+      }
+    } finally {
+      executor.shutdownNow();
+    }
+
+    // Assert the aggregated count directly. Without synchronization the concurrent read-modify-write of
+    // _aggregateCount loses updates and the observed count is smaller than the expected total.
+    long aggregatedCount = metricEmitter.getAggregateCount();
+    assertEquals(aggregatedCount, expectedTotal,
+        "Concurrent emitMetric lost updates: expected " + expectedTotal + " but aggregated " + aggregatedCount);
   }
 
   private int calcExpectedRatio(double rateLimitInMinutes, int sumOfMsgsInPrevMinute) {

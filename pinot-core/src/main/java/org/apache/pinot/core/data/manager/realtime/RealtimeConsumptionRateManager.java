@@ -64,8 +64,8 @@ public class RealtimeConsumptionRateManager {
       ServerMeter.REALTIME_ROWS_CONSUMED.getMeterName();
   private static final String SERVER_BYTES_CONSUMPTION_RATE_METRIC_KEY_NAME =
       ServerMeter.REALTIME_BYTES_CONSUMED.getMeterName();
-  private ConsumptionRateLimiter _serverRateLimiter = NOOP_RATE_LIMITER;
-  private ConsumptionRateLimiter _serverBytesRateLimiter = NOOP_RATE_LIMITER;
+  private volatile ConsumptionRateLimiter _serverRateLimiter = NOOP_RATE_LIMITER;
+  private volatile ConsumptionRateLimiter _serverBytesRateLimiter = NOOP_RATE_LIMITER;
 
   // stream config object is required for fetching the partition count from the stream
   private final LoadingCache<StreamConfig, Integer> _streamConfigToTopicPartitionCountMap;
@@ -296,7 +296,14 @@ public class RealtimeConsumptionRateManager {
       _gauge = gauge;
     }
 
-    int emitMetric(long count, double rateLimit, Instant now) {
+    // The server-wide rate limiter shares one MetricEmitter across all partition consumer threads, so this method
+    // must be thread-safe. Method-level synchronization is the right granularity (rather than a finer lock or an
+    // atomic counter): the minute rollover reads _aggregateCount, emits the gauge, then resets both _previousMinute
+    // and _aggregateCount, so the accumulate and the rollover must be mutually exclusive as a single unit. Both
+    // fields are private and touched only here (and getAggregateCount below), so this monitor covers every access;
+    // any future accessor must take the same lock. Per-partition emitters are single-threaded and only pay an
+    // uncontended lock per MessageBatch, which is negligible at batch granularity.
+    synchronized int emitMetric(long count, double rateLimit, Instant now) {
       int ratioPercentage = 0;
       long nowInMinutes = now.getEpochSecond() / 60;
       if (nowInMinutes == _previousMinute) {
@@ -313,6 +320,11 @@ public class RealtimeConsumptionRateManager {
         _previousMinute = nowInMinutes;
       }
       return ratioPercentage;
+    }
+
+    @VisibleForTesting
+    synchronized long getAggregateCount() {
+      return _aggregateCount;
     }
   }
 }
