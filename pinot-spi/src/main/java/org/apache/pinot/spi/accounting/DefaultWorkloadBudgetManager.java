@@ -176,14 +176,19 @@ public class DefaultWorkloadBudgetManager implements WorkloadBudgetManager {
     if (!_isCostCollectionEnabled) {
       return new BudgetStats(Long.MAX_VALUE, Long.MAX_VALUE, Long.MAX_VALUE, Long.MAX_VALUE);
     }
-    long totalCpuBudget =
-        _workloadBudgets.values().stream().mapToLong(budget -> budget.getStats()._initialCpuBudget).sum();
-    long totalMemoryBudget =
-        _workloadBudgets.values().stream().mapToLong(budget -> budget.getStats()._initialMemoryBudget).sum();
-    long totalCpuRemaining =
-        _workloadBudgets.values().stream().mapToLong(budget -> budget.getStats()._cpuRemaining).sum();
-    long totalMemRemaining =
-        _workloadBudgets.values().stream().mapToLong(budget -> budget.getStats()._memoryRemaining).sum();
+
+    long totalCpuBudget = 0L;
+    long totalMemoryBudget = 0L;
+    long totalCpuRemaining = 0L;
+    long totalMemRemaining = 0L;
+    for (Budget budget : _workloadBudgets.values()) {
+      BudgetStats stats = budget.getStats();
+      totalCpuBudget += stats._initialCpuBudget;
+      totalMemoryBudget += stats._initialMemoryBudget;
+      totalCpuRemaining += stats._cpuRemaining;
+      totalMemRemaining += stats._memoryRemaining;
+    }
+
     return new BudgetStats(totalCpuBudget, totalMemoryBudget, totalCpuRemaining, totalMemRemaining);
   }
 
@@ -193,18 +198,27 @@ public class DefaultWorkloadBudgetManager implements WorkloadBudgetManager {
   private void startBudgetResetTask() {
     LOGGER.debug("Starting budget reset task with enforcement window: {}ms", _enforcementWindowMs);
     _resetScheduler.scheduleAtFixedRate(() -> {
-      LOGGER.debug("Resetting all workload budgets.");
-      // Also print the budget used in the last enforcement window.
-      _workloadBudgets.forEach((workload, budget) -> {
-        BudgetStats stats = budget.getStats();
-        LOGGER.debug("Workload: {} -> CPU: {}ns, Memory: {} bytes", workload, stats._cpuRemaining,
-            stats._memoryRemaining);
-        if (_isCostEmissionEnabled) {
-          collectWorkloadStats(workload, stats);
-        }
-        // Reset the budget.
-        budget.reset();
-      });
+      try {
+        LOGGER.debug("Resetting all workload budgets.");
+        // Also print the budget used in the last enforcement window.
+        _workloadBudgets.forEach((workload, budget) -> {
+          try {
+            BudgetStats stats = budget.getStats();
+            LOGGER.debug("Workload: {} -> CPU: {}ns, Memory: {} bytes", workload, stats._cpuRemaining,
+                stats._memoryRemaining);
+            if (_isCostEmissionEnabled) {
+              collectWorkloadStats(workload, stats);
+            }
+          } catch (Exception t) {
+            LOGGER.error("Failed to collect stats for workload: {}", workload, t);
+          } finally {
+            // Reset the budget.
+            budget.reset();
+          }
+        });
+      } catch (Exception t) {
+        LOGGER.error("Failed to reset workload budgets", t);
+      }
     }, _enforcementWindowMs, _enforcementWindowMs, TimeUnit.MILLISECONDS);
   }
 

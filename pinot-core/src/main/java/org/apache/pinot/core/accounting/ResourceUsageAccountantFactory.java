@@ -122,12 +122,17 @@ public class ResourceUsageAccountantFactory implements ThreadAccountantFactory {
 
     @Override
     public void setupTask(QueryThreadContext threadContext) {
-      _threadLocalEntry.get().setThreadContext(threadContext);
+      getOrCreateThreadResourceTracker().setThreadContext(threadContext);
+    }
+
+    // Returns the thread resource tracker for the current thread, creating a new one if it does not exist.
+    private ThreadResourceTrackerImpl getOrCreateThreadResourceTracker() {
+      return _threadLocalEntry.get();
     }
 
     @Override
     public void sampleUsage() {
-      ThreadResourceTrackerImpl threadTracker = _threadLocalEntry.get();
+      ThreadResourceTrackerImpl threadTracker = getOrCreateThreadResourceTracker();
       if (_cpuSamplingEnabled) {
         threadTracker.updateCpuSnapshot();
       }
@@ -138,7 +143,7 @@ public class ResourceUsageAccountantFactory implements ThreadAccountantFactory {
 
     @Override
     public void clear() {
-      ThreadResourceTrackerImpl threadTracker = _threadLocalEntry.get();
+      ThreadResourceTrackerImpl threadTracker = getOrCreateThreadResourceTracker();
       assert threadTracker.getThreadContext() != null;
       QueryExecutionContext executionContext = threadTracker.getThreadContext().getExecutionContext();
       long cpuTimeNs = threadTracker.getCpuTimeNs();

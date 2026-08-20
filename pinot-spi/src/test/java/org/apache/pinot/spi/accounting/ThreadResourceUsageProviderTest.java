@@ -1,0 +1,88 @@
+/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.pinot.spi.accounting;
+
+import org.testng.annotations.AfterClass;
+import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.Test;
+
+import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertTrue;
+
+
+public class ThreadResourceUsageProviderTest {
+  // Roughly 16MB, well beyond any measurement noise.
+  private static final int ALLOCATION_SIZE = 2_000_000;
+  private static final long EXPECTED_MIN_ALLOCATED_BYTES = 16_000_000L;
+
+  @BeforeMethod
+  public void setup() {
+    ThreadResourceUsageProvider.setThreadMemoryMeasurementEnabled(true);
+  }
+
+  @AfterClass
+  public void teardown() {
+    ThreadResourceUsageProvider.setThreadMemoryMeasurementEnabled(true);
+  }
+
+  @Test
+  public void testAllocatedBytesReturnsZeroWhenDisabled() {
+    ThreadResourceUsageProvider.setThreadMemoryMeasurementEnabled(false);
+    assertFalse(ThreadResourceUsageProvider.isThreadMemoryMeasurementEnabled(),
+        "Expected thread memory measurement to be disabled");
+
+    long[] sink = new long[ALLOCATION_SIZE];
+    sink[sink.length - 1] = System.nanoTime();
+
+    // Must be exactly 0. The underlying bean returns -1 while disabled, which would be charged as usage.
+    assertEquals(ThreadResourceUsageProvider.getCurrentThreadAllocatedBytes(), 0,
+        "Expected allocated bytes to be 0 when measurement is disabled");
+  }
+
+  @Test
+  public void testAllocatedBytesTracksAllocationsWhenEnabled() {
+    assertTrue(ThreadResourceUsageProvider.isThreadMemoryMeasurementEnabled(),
+        "Expected thread memory measurement to be enabled");
+
+    long before = ThreadResourceUsageProvider.getCurrentThreadAllocatedBytes();
+    assertTrue(before > 0, "Expected a positive baseline, got: " + before);
+
+    long[] sink = new long[ALLOCATION_SIZE];
+    sink[sink.length - 1] = System.nanoTime();
+    long after = ThreadResourceUsageProvider.getCurrentThreadAllocatedBytes();
+
+    assertTrue(after - before >= EXPECTED_MIN_ALLOCATED_BYTES,
+        "Expected at least " + EXPECTED_MIN_ALLOCATED_BYTES + " bytes tracked, before: " + before + " after: " + after);
+    assertTrue(sink[sink.length - 1] != 0);
+  }
+
+  @Test
+  public void testMeasurementCanBeReEnabledAfterDisable() {
+    ThreadResourceUsageProvider.setThreadMemoryMeasurementEnabled(false);
+    assertFalse(ThreadResourceUsageProvider.isThreadMemoryMeasurementEnabled());
+    assertEquals(ThreadResourceUsageProvider.getCurrentThreadAllocatedBytes(), 0);
+
+    ThreadResourceUsageProvider.setThreadMemoryMeasurementEnabled(true);
+    assertTrue(ThreadResourceUsageProvider.isThreadMemoryMeasurementEnabled(),
+        "Expected measurement to be re-enabled after being disabled");
+    assertTrue(ThreadResourceUsageProvider.getCurrentThreadAllocatedBytes() > 0,
+        "Expected positive allocated bytes after re-enabling, not the bean's disabled sentinel of -1");
+  }
+}

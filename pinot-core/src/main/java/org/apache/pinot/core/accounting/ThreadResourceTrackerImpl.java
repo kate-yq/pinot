@@ -18,7 +18,6 @@
  */
 package org.apache.pinot.core.accounting;
 
-import java.util.concurrent.atomic.AtomicReference;
 import javax.annotation.Nullable;
 import org.apache.pinot.spi.accounting.ThreadResourceSnapshot;
 import org.apache.pinot.spi.accounting.ThreadResourceTracker;
@@ -27,8 +26,7 @@ import org.apache.pinot.spi.query.QueryThreadContext;
 
 public class ThreadResourceTrackerImpl implements ThreadResourceTracker {
   // Reference to the current running query thread context, null if idle
-  AtomicReference<QueryThreadContext> _currentThreadContext = new AtomicReference<>();
-
+  private volatile QueryThreadContext _currentThreadContext;
   // Thread resource usage snapshot
   private final ThreadResourceSnapshot _threadResourceSnapshot = new ThreadResourceSnapshot();
 
@@ -39,7 +37,7 @@ public class ThreadResourceTrackerImpl implements ThreadResourceTracker {
   @Nullable
   @Override
   public QueryThreadContext getThreadContext() {
-    return _currentThreadContext.get();
+    return _currentThreadContext;
   }
 
   @Override
@@ -53,7 +51,7 @@ public class ThreadResourceTrackerImpl implements ThreadResourceTracker {
   }
 
   public void setThreadContext(QueryThreadContext threadContext) {
-    _currentThreadContext.set(threadContext);
+    _currentThreadContext = threadContext;
     _threadResourceSnapshot.reset();
   }
 
@@ -66,7 +64,7 @@ public class ThreadResourceTrackerImpl implements ThreadResourceTracker {
   }
 
   public void clear() {
-    _currentThreadContext.set(null);
+    _currentThreadContext = null;
     _cpuTimeNs = 0;
     _allocatedBytes = 0;
   }
