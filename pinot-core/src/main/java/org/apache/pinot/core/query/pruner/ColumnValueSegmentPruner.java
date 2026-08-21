@@ -86,7 +86,7 @@ public class ColumnValueSegmentPruner extends ValueBasedSegmentPruner {
     } else if (predicateType == Predicate.Type.IN) {
       return pruneInPredicate(segment, (InPredicate) predicate, dataSourceCache, cachedValues, query);
     } else if (predicateType == Predicate.Type.RANGE) {
-      return pruneRangePredicate(segment, (RangePredicate) predicate, dataSourceCache, query);
+      return pruneRangePredicate(segment, (RangePredicate) predicate, dataSourceCache, cachedValues, query);
     } else {
       return false;
     }
@@ -159,26 +159,20 @@ public class ColumnValueSegmentPruner extends ValueBasedSegmentPruner {
    * </ul>
    */
   private boolean pruneRangePredicate(IndexSegment segment, RangePredicate rangePredicate,
-      Map<String, DataSource> dataSourceCache, QueryContext query) {
+      Map<String, DataSource> dataSourceCache, ValueCache cachedValues, QueryContext query) {
     String column = rangePredicate.getLhs().getIdentifier();
     DataSource dataSource = segment instanceof ImmutableSegment ? segment.getDataSource(column, query.getSchema())
         : dataSourceCache.computeIfAbsent(column, col -> segment.getDataSource(column, query.getSchema()));
     assert dataSource != null;
     DataSourceMetadata dataSourceMetadata = dataSource.getDataSourceMetadata();
 
-    // Get lower/upper boundary value
+    // Get lower/upper boundary value. The converted values are cached on the predicate so the literal bounds are
+    // parsed once per query instead of once per segment.
     DataType dataType = dataSourceMetadata.getDataType();
-    String lowerBound = rangePredicate.getLowerBound();
-    Comparable lowerBoundValue = null;
-    if (!lowerBound.equals(RangePredicate.UNBOUNDED)) {
-      lowerBoundValue = convertValue(lowerBound, dataType);
-    }
+    ValueCache.RangeCachedValues boundValues = cachedValues.get(rangePredicate, dataType);
+    Comparable lowerBoundValue = boundValues.getLowerBoundValue();
     boolean lowerInclusive = rangePredicate.isLowerInclusive();
-    String upperBound = rangePredicate.getUpperBound();
-    Comparable upperBoundValue = null;
-    if (!upperBound.equals(RangePredicate.UNBOUNDED)) {
-      upperBoundValue = convertValue(upperBound, dataType);
-    }
+    Comparable upperBoundValue = boundValues.getUpperBoundValue();
     boolean upperInclusive = rangePredicate.isUpperInclusive();
 
     // Check if the range is valid

@@ -24,11 +24,13 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import javax.annotation.Nullable;
 import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.common.request.context.FilterContext;
 import org.apache.pinot.common.request.context.predicate.EqPredicate;
 import org.apache.pinot.common.request.context.predicate.InPredicate;
 import org.apache.pinot.common.request.context.predicate.Predicate;
+import org.apache.pinot.common.request.context.predicate.RangePredicate;
 import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.segment.local.segment.index.readers.bloom.GuavaBloomFilterReaderUtils;
 import org.apache.pinot.segment.spi.IndexSegment;
@@ -202,6 +204,61 @@ abstract public class ValueBasedSegmentPruner implements SegmentPruner {
         cachedValue.ensureDataType(dt);
       }
       return cachedValues;
+    }
+
+    private RangeCachedValues add(RangePredicate pred) {
+      String lowerBound = pred.getLowerBound();
+      String upperBound = pred.getUpperBound();
+      CachedValue lower = lowerBound.equals(RangePredicate.UNBOUNDED) ? null : new CachedValue(lowerBound);
+      CachedValue upper = upperBound.equals(RangePredicate.UNBOUNDED) ? null : new CachedValue(upperBound);
+      RangeCachedValues vals = new RangeCachedValues(lower, upper);
+      _cache.put(pred, vals);
+      return vals;
+    }
+
+    public RangeCachedValues get(RangePredicate pred, DataType dt) {
+      RangeCachedValues cachedValues = (RangeCachedValues) _cache.get(pred);
+      if (cachedValues == null) {
+        cachedValues = add(pred);
+      }
+      cachedValues.ensureDataType(dt);
+      return cachedValues;
+    }
+
+    /**
+     * Holds the converted lower and upper bounds of a {@link RangePredicate}. Either bound may be {@code null} when it
+     * is unbounded. The conversion is cached so the literal bounds are parsed once per query instead of once per
+     * segment.
+     */
+    public static class RangeCachedValues {
+      @Nullable
+      private final CachedValue _lowerBound;
+      @Nullable
+      private final CachedValue _upperBound;
+
+      private RangeCachedValues(@Nullable CachedValue lowerBound, @Nullable CachedValue upperBound) {
+        _lowerBound = lowerBound;
+        _upperBound = upperBound;
+      }
+
+      private void ensureDataType(DataType dt) {
+        if (_lowerBound != null) {
+          _lowerBound.ensureDataType(dt);
+        }
+        if (_upperBound != null) {
+          _upperBound.ensureDataType(dt);
+        }
+      }
+
+      @Nullable
+      public Comparable getLowerBoundValue() {
+        return _lowerBound != null ? _lowerBound.getComparableValue() : null;
+      }
+
+      @Nullable
+      public Comparable getUpperBoundValue() {
+        return _upperBound != null ? _upperBound.getComparableValue() : null;
+      }
     }
 
     public static class CachedValue {
