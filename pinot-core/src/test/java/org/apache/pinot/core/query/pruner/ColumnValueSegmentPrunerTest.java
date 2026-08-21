@@ -19,9 +19,11 @@
 package org.apache.pinot.core.query.pruner;
 
 import com.google.common.collect.ImmutableSet;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.core.query.request.context.utils.QueryContextConverterUtils;
@@ -40,6 +42,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
@@ -110,6 +113,90 @@ public class ColumnValueSegmentPrunerTest {
     assertTrue(runPruner(indexSegment, "SELECT COUNT(*) FROM testTable WHERE column > 30 OR column < 10"));
     assertTrue(runPruner(indexSegment,
         "SELECT COUNT(*) FROM testTable WHERE column BETWEEN 0 AND 5 OR column BETWEEN 30 AND 35"));
+  }
+
+  /**
+   * Verifies that when a single range predicate is evaluated against multiple segments in one prune() call, the
+   * converted bounds are cached once and reused correctly: each segment is kept or pruned based purely on its own
+   * min/max range, and reuse of the cached bounds never corrupts a later segment's decision.
+   */
+  @Test
+  public void testRangePruningReusesCachedBoundsAcrossSegments() {
+    // Query range is [20321, 20686). Build segments that fall entirely below, overlapping, and entirely above it.
+    IndexSegment below = mockIndexSegment(DataType.INT, 20140, 20200);      // max < lower -> pruned
+    IndexSegment lowerEdge = mockIndexSegment(DataType.INT, 20300, 20321);  // max == lower (inclusive) -> kept
+    IndexSegment overlap = mockIndexSegment(DataType.INT, 20330, 20400);    // within range -> kept
+    IndexSegment upperEdge = mockIndexSegment(DataType.INT, 20686, 20700);  // min == upper (exclusive) -> pruned
+    IndexSegment above = mockIndexSegment(DataType.INT, 20800, 20900);      // min > upper -> pruned
+
+    List<IndexSegment> segments = Arrays.asList(below, lowerEdge, overlap, upperEdge, above);
+    String query = "SELECT COUNT(*) FROM testTable WHERE column >= 20321 AND column < 20686";
+
+    List<IndexSegment> survivors = runPruner(segments, query);
+
+    // Only the segments whose range intersects [20321, 20686) survive; order of evaluation must not matter.
+    assertEquals(survivors, Arrays.asList(lowerEdge, overlap));
+
+    // Re-running the same segments in a different order yields the same per-segment decisions.
+    List<IndexSegment> reordered = Arrays.asList(above, overlap, below, lowerEdge, upperEdge);
+    assertEquals(runPruner(reordered, query), Arrays.asList(overlap, lowerEdge));
+  }
+
+  /**
+   * Same as the reuse test above but using BETWEEN, which produces a single RANGE predicate with both bounds
+   * inclusive ([lower, upper]). This mirrors what the server-side filter optimizer emits when it merges
+   * {@code col >= x AND col <= y} into one range, and exercises the inclusive-lower / inclusive-upper branches.
+   * With inclusive bounds the segment whose min equals the upper bound is kept (unlike the half-open case).
+   */
+  @Test
+  public void testBetweenRangePruningReusesCachedBoundsAcrossSegments() {
+    // Query range is [20321, 20686] (both inclusive).
+    IndexSegment below = mockIndexSegment(DataType.INT, 20140, 20200);      // max < lower -> pruned
+    IndexSegment lowerEdge = mockIndexSegment(DataType.INT, 20300, 20321);  // max == lower (inclusive) -> kept
+    IndexSegment overlap = mockIndexSegment(DataType.INT, 20330, 20400);    // within range -> kept
+    IndexSegment upperEdge = mockIndexSegment(DataType.INT, 20686, 20700);  // min == upper (inclusive) -> kept
+    IndexSegment above = mockIndexSegment(DataType.INT, 20800, 20900);      // min > upper -> pruned
+
+    List<IndexSegment> segments = Arrays.asList(below, lowerEdge, overlap, upperEdge, above);
+    String query = "SELECT COUNT(*) FROM testTable WHERE column BETWEEN 20321 AND 20686";
+
+    // Inclusive on both ends, so lowerEdge and upperEdge are both kept.
+    assertEquals(runPruner(segments, query), Arrays.asList(lowerEdge, overlap, upperEdge));
+  }
+
+  /**
+   * Verifies that the cached range bounds are re-converted when the column data type differs across segments (schema
+   * evolution). The bounds "3"/"8" are valid for both LONG and DOUBLE; if a LONG segment reused a DOUBLE-converted
+   * bound (or vice versa) the min/max comparison would use the wrong type. Each segment's min/max is typed to match
+   * its own column type so the comparisons are apples-to-apples.
+   */
+  @Test
+  public void testRangePruningHandlesHeterogeneousDataTypeAcrossSegments() {
+    IndexSegment doubleKept = mockIndexSegment(DataType.DOUBLE, 0.0, 5.0);    // (3,8) intersects [0,5] -> kept
+    IndexSegment doublePruned = mockIndexSegment(DataType.DOUBLE, 8.0, 9.0);  // min == upper (exclusive) -> pruned
+    IndexSegment longKept = mockIndexSegment(DataType.LONG, 3L, 4L);          // [3,4] within (3,8) -> kept
+    IndexSegment longPruned = mockIndexSegment(DataType.LONG, 10L, 20L);      // above 8 -> pruned
+
+    // Interleave the types so the cache flips DOUBLE -> LONG -> DOUBLE -> LONG and must re-convert each time.
+    List<IndexSegment> segments = Arrays.asList(doubleKept, longPruned, doublePruned, longKept);
+    String query = "SELECT COUNT(*) FROM testTable WHERE column > 3 AND column < 8";
+
+    assertEquals(runPruner(segments, query), Arrays.asList(doubleKept, longKept));
+  }
+
+  /**
+   * Verifies that a half-open range (one UNBOUNDED side) is cached and reused correctly across multiple segments.
+   */
+  @Test
+  public void testRangePruningWithUnboundedSideAcrossSegments() {
+    IndexSegment below = mockIndexSegment(DataType.INT, 0, 50);        // max < 100 -> pruned
+    IndexSegment edge = mockIndexSegment(DataType.INT, 90, 100);       // max == 100 (inclusive) -> kept
+    IndexSegment above = mockIndexSegment(DataType.INT, 200, 300);     // within [100, +inf) -> kept
+
+    // Only a lower bound; upper bound is UNBOUNDED.
+    String query = "SELECT COUNT(*) FROM testTable WHERE column >= 100";
+
+    assertEquals(runPruner(Arrays.asList(below, edge, above), query), Arrays.asList(edge, above));
   }
 
   @Test
@@ -190,9 +277,34 @@ public class ColumnValueSegmentPrunerTest {
     return indexSegment;
   }
 
+  /**
+   * Creates a segment whose single "column" reports the given data type and min/max range for pruning.
+   */
+  private IndexSegment mockIndexSegment(DataType dataType, Comparable minValue, Comparable maxValue) {
+    IndexSegment indexSegment = mockIndexSegment();
+    DataSource dataSource = mock(DataSource.class);
+    when(indexSegment.getDataSource(eq("column"), any(Schema.class))).thenReturn(dataSource);
+    DataSourceMetadata dataSourceMetadata = mock(DataSourceMetadata.class);
+    when(dataSourceMetadata.getDataType()).thenReturn(dataType);
+    when(dataSourceMetadata.getMinValue()).thenReturn(minValue);
+    when(dataSourceMetadata.getMaxValue()).thenReturn(maxValue);
+    when(dataSource.getDataSourceMetadata()).thenReturn(dataSourceMetadata);
+    return indexSegment;
+  }
+
   private boolean runPruner(IndexSegment indexSegment, String query) {
     QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
     queryContext.setSchema(mock(Schema.class));
     return PRUNER.prune(Arrays.asList(indexSegment), queryContext).isEmpty();
+  }
+
+  /**
+   * Prunes {@code query} across the given segments in a single {@code prune()} call (so the per-query ValueCache is
+   * shared across all of them) and returns the surviving segments.
+   */
+  private List<IndexSegment> runPruner(List<IndexSegment> indexSegments, String query) {
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
+    queryContext.setSchema(mock(Schema.class));
+    return PRUNER.prune(new ArrayList<>(indexSegments), queryContext);
   }
 }
