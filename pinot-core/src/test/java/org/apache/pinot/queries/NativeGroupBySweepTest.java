@@ -28,8 +28,6 @@ import java.util.Map;
 import java.util.Random;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.common.response.broker.ResultTable;
-import org.apache.pinot.core.operator.combine.NativeGroupByCombineRouter;
-import org.apache.pinot.core.query.aggregation.groupby.NativeGroupByRouter;
 import org.apache.pinot.segment.local.indexsegment.immutable.ImmutableSegmentLoader;
 import org.apache.pinot.segment.local.segment.creator.impl.SegmentIndexCreationDriverImpl;
 import org.apache.pinot.segment.local.segment.readers.GenericRowRecordReader;
@@ -80,8 +78,6 @@ import org.testng.annotations.Test;
  */
 public class NativeGroupBySweepTest extends BaseQueriesTest {
   private static final String LIB_PATH_PROP = "pinot.native.lib.path";
-  private static final String SEGMENT_ENABLED = "pinot.native.groupby.enabled";
-  private static final String COMBINE_ENABLED = NativeGroupByCombineRouter.ENABLED_PROPERTY;
   private static final String SERIALIZE_PROPERTY = "pinot.native.groupby.combine.serialize";
   private static final String MULTICOL_PROPERTY = "pinot.native.groupby.combine.multicol";
 
@@ -128,6 +124,11 @@ public class NativeGroupBySweepTest extends BaseQueriesTest {
   private static final Map<String, String> QUERY_OPTIONS = Map.of(
       QueryOptionKey.NUM_GROUPS_LIMIT, "20000000",
       QueryOptionKey.GROUP_TRIM_THRESHOLD, "1000000000");
+  // Same options plus the native-engine gate (as the broker would stamp from table/cluster config).
+  private static final Map<String, String> QUERY_OPTIONS_NATIVE = Map.of(
+      QueryOptionKey.NUM_GROUPS_LIMIT, "20000000",
+      QueryOptionKey.GROUP_TRIM_THRESHOLD, "1000000000",
+      QueryOptionKey.NATIVE_ENGINE_ENABLED, "true");
 
   static {
     String resolved = resolveDevLibPath();
@@ -298,10 +299,9 @@ public class NativeGroupBySweepTest extends BaseQueriesTest {
         for (int limit : limits) {
           String query = bodyBeforeLimit + " LIMIT " + limit;
 
-          clearNative();
           ResultTable baseResult = getBrokerResponse(query, QUERY_OPTIONS).getResultTable();
           setNative();
-          ResultTable nativeResult = getBrokerResponse(query, QUERY_OPTIONS).getResultTable();
+          ResultTable nativeResult = getBrokerResponse(query, QUERY_OPTIONS_NATIVE).getResultTable();
           clearNative();
           int baseRows = baseResult.getRows().size();
           int nativeRows = nativeResult.getRows().size();
@@ -326,17 +326,20 @@ public class NativeGroupBySweepTest extends BaseQueriesTest {
   }
 
   private double time(String query, boolean nativePath, int warmup, int measure) {
+    Map<String, String> options;
     if (nativePath) {
       setNative();
+      options = QUERY_OPTIONS_NATIVE;
     } else {
       clearNative();
+      options = QUERY_OPTIONS;
     }
     for (int i = 0; i < warmup; i++) {
-      getBrokerResponse(query, QUERY_OPTIONS);
+      getBrokerResponse(query, options);
     }
     long start = System.nanoTime();
     for (int i = 0; i < measure; i++) {
-      getBrokerResponse(query, QUERY_OPTIONS);
+      getBrokerResponse(query, options);
     }
     return (System.nanoTime() - start) / 1e6 / measure;
   }
@@ -371,19 +374,14 @@ public class NativeGroupBySweepTest extends BaseQueriesTest {
   }
 
   private void setNative() {
-    System.setProperty(SEGMENT_ENABLED, "true");
-    System.setProperty(COMBINE_ENABLED, "true");
     System.setProperty(SERIALIZE_PROPERTY, "true");
     // Multi-column combine merge strategy: ColumnWise (DataFusion-style typed column hashing, design B).
     System.setProperty(MULTICOL_PROPERTY, "columnwise");
   }
 
   private void clearNative() {
-    System.clearProperty(SEGMENT_ENABLED);
-    System.clearProperty(COMBINE_ENABLED);
     System.clearProperty(SERIALIZE_PROPERTY);
     System.clearProperty(MULTICOL_PROPERTY);
-    System.clearProperty(NativeGroupByRouter.ENABLED_PROPERTY);
   }
 
   private static String resolveDevLibPath() {

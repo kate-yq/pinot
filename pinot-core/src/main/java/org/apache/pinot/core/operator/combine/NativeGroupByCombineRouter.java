@@ -33,7 +33,8 @@ import org.apache.pinot.segment.spi.AggregationFunctionType;
  *
  * <p>Eligibility:
  * <ol>
- *   <li>Flag {@code pinot.native.groupby.combine.enabled} is {@code true}.</li>
+ *   <li>The native engine is enabled for this query ({@code queryContext.isNativeEngineEnabled()},
+ *       resolved from table/cluster config).</li>
  *   <li>The native library is loaded.</li>
  *   <li>Null handling is disabled.</li>
  *   <li>One or more group-by keys. The operator dispatches per column on the type discovered from the
@@ -54,19 +55,21 @@ import org.apache.pinot.segment.spi.AggregationFunctionType;
  * <p>Never throws; when ineligible the caller uses {@code GroupByCombineOperator} unchanged.
  */
 public final class NativeGroupByCombineRouter {
-  public static final String ENABLED_PROPERTY = "pinot.native.groupby.combine.enabled";
 
   private NativeGroupByCombineRouter() {
   }
 
-  /** Whether the native combine path is enabled by property (does not check per-query eligibility). */
-  public static boolean isEnabled() {
-    return Boolean.getBoolean(ENABLED_PROPERTY);
+  /**
+   * Whether the native combine path is enabled for this query by the resolved table/cluster gate
+   * (does not check per-query eligibility).
+   */
+  public static boolean isEnabled(QueryContext queryContext) {
+    return queryContext.isNativeEngineEnabled();
   }
 
   @SuppressWarnings("rawtypes")
   public static boolean shouldAccelerate(QueryContext queryContext) {
-    if (!Boolean.getBoolean(ENABLED_PROPERTY)) {
+    if (!queryContext.isNativeEngineEnabled()) {
       return false;
     }
     if (!PinotNativeGroupByCombine.isAvailable()) {

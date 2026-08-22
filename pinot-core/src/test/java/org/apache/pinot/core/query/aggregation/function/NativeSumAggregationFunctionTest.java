@@ -31,7 +31,6 @@ import org.apache.pinot.core.query.aggregation.DoubleAggregationResultHolder;
 import org.apache.pinot.nativeengine.agg.PinotNativeAgg;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.testng.SkipException;
-import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
@@ -50,7 +49,6 @@ import static org.testng.Assert.assertTrue;
  */
 public class NativeSumAggregationFunctionTest {
 
-  private static final String NATIVE_FLAG = NativeAggregationRouter.ENABLED_PROPERTY;
   private static final String LIB_PATH_PROP = "pinot.native.lib.path";
 
   // Set the lib path system property before PinotNativeAgg is touched anywhere in this test.
@@ -63,45 +61,34 @@ public class NativeSumAggregationFunctionTest {
   }
 
   @BeforeClass
-  public void enableNativeFlag() {
+  public void checkNativeAvailable() {
     if (!PinotNativeAgg.isAvailable()) {
       throw new SkipException("pinot-native library not loadable. Build it with "
           + "'./mvnw -pl pinot-native package' first. Searched at "
           + System.getProperty(LIB_PATH_PROP));
     }
-    System.setProperty(NATIVE_FLAG, "true");
-  }
-
-  @AfterClass(alwaysRun = true)
-  public void clearNativeFlag() {
-    System.clearProperty(NATIVE_FLAG);
   }
 
   @Test
   public void factoryReturnsNativeImplWhenFlagOnAndEligible() {
     FunctionContext fc = sumOfColumn("longCol");
-    AggregationFunction fn = AggregationFunctionFactory.getAggregationFunction(fc, false);
+    AggregationFunction fn = AggregationFunctionFactory.getAggregationFunction(fc, false, true);
     assertTrue(fn instanceof NativeSumAggregationFunction,
         "expected NativeSumAggregationFunction, got " + fn.getClass().getName());
   }
 
   @Test
   public void factoryReturnsJavaImplWhenFlagOff() {
-    System.clearProperty(NATIVE_FLAG);
-    try {
-      FunctionContext fc = sumOfColumn("longCol");
-      AggregationFunction fn = AggregationFunctionFactory.getAggregationFunction(fc, false);
-      assertEquals(fn.getClass(), SumAggregationFunction.class,
-          "expected plain SumAggregationFunction when flag is off, got " + fn.getClass().getName());
-    } finally {
-      System.setProperty(NATIVE_FLAG, "true");
-    }
+    FunctionContext fc = sumOfColumn("longCol");
+    AggregationFunction fn = AggregationFunctionFactory.getAggregationFunction(fc, false, false);
+    assertEquals(fn.getClass(), SumAggregationFunction.class,
+        "expected plain SumAggregationFunction when flag is off, got " + fn.getClass().getName());
   }
 
   @Test
   public void factoryReturnsJavaImplWhenNullHandlingEnabled() {
     FunctionContext fc = sumOfColumn("longCol");
-    AggregationFunction fn = AggregationFunctionFactory.getAggregationFunction(fc, true);
+    AggregationFunction fn = AggregationFunctionFactory.getAggregationFunction(fc, true, true);
     assertEquals(fn.getClass(), SumAggregationFunction.class,
         "null handling currently disqualifies the native path");
   }

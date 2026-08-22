@@ -576,6 +576,10 @@ public class CommonConstants {
         public static final String USE_FIXED_REPLICA = "useFixedReplica";
         public static final String EXPLAIN_PLAN_VERBOSE = "explainPlanVerbose";
         public static final String USE_MULTISTAGE_ENGINE = "useMultistageEngine";
+        // Broker-internal option: gates the native (Rust/JNI) execution engine on the server. NOT a
+        // user-facing option — the broker authoritatively stamps this from table/cluster config and
+        // strips any client-supplied value, so users cannot toggle native execution per query.
+        public static final String NATIVE_ENGINE_ENABLED = "nativeEngineEnabled";
         public static final String INFER_PARTITION_HINT = "inferPartitionHint";
         public static final String ENABLE_NULL_HANDLING = "enableNullHandling";
         public static final String APPLICATION_NAME = "applicationName";

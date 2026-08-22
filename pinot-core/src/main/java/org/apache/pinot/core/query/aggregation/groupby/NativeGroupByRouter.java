@@ -36,7 +36,8 @@ import org.apache.pinot.spi.data.FieldSpec.DataType;
  *
  * <p>Eligibility (all must hold):
  * <ol>
- *   <li>Feature flag {@code pinot.native.groupby.enabled} is {@code true}.</li>
+ *   <li>The native engine is enabled for this query (resolved from table/cluster config,
+ *       {@code queryContext.isNativeEngineEnabled()}).</li>
  *   <li>The native library is loaded ({@link PinotNativeGroupBy#isAvailable()}).</li>
  *   <li>Null handling is disabled.</li>
  *   <li>No in-segment trim is triggered (no ORDER BY with a positive min segment group trim size) —
@@ -53,7 +54,6 @@ import org.apache.pinot.spi.data.FieldSpec.DataType;
  * <p>The router never throws; when ineligible the caller uses the Java executor unchanged.
  */
 public final class NativeGroupByRouter {
-  public static final String ENABLED_PROPERTY = "pinot.native.groupby.enabled";
 
   private NativeGroupByRouter() {
   }
@@ -61,7 +61,7 @@ public final class NativeGroupByRouter {
   @SuppressWarnings("rawtypes")
   public static boolean shouldAccelerate(QueryContext queryContext, ExpressionContext[] groupByExpressions,
       BaseProjectOperator<?> projectOperator) {
-    if (!Boolean.getBoolean(ENABLED_PROPERTY)) {
+    if (!queryContext.isNativeEngineEnabled()) {
       return false;
     }
     if (!PinotNativeGroupBy.isAvailable()) {

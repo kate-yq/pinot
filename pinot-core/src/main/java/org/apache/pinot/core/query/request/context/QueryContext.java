@@ -136,6 +136,10 @@ public class QueryContext {
   private int _chunkSizeExtractFinalResult = InstancePlanMakerImplV2.DEFAULT_CHUNK_SIZE_EXTRACT_FINAL_RESULT;
   // Whether null handling is enabled
   private boolean _nullHandlingEnabled;
+  // Whether the native (Rust/JNI) execution engine is enabled for this query (resolved from the
+  // broker-stamped query option, itself sourced from table/cluster config). When true, per-query
+  // eligibility (router shouldAccelerate) still decides whether a given query actually runs native.
+  private boolean _nativeEngineEnabled;
   // Whether server returns the final result
   private boolean _serverReturnFinalResult;
   // Whether server returns the final result with unpartitioned group key
@@ -479,6 +483,14 @@ public class QueryContext {
     return _serverReturnFinalResult;
   }
 
+  public boolean isNativeEngineEnabled() {
+    return _nativeEngineEnabled;
+  }
+
+  public void setNativeEngineEnabled(boolean nativeEngineEnabled) {
+    _nativeEngineEnabled = nativeEngineEnabled;
+  }
+
   public void setServerReturnFinalResult(boolean serverReturnFinalResult) {
     _serverReturnFinalResult = serverReturnFinalResult;
   }
@@ -646,6 +658,7 @@ public class QueryContext {
               _filter, _groupByExpressions, _havingFilter, _orderByExpressions, _limit, _offset, _queryOptions,
               _expressionOverrideHints, _explain);
       queryContext.setNullHandlingEnabled(QueryOptionsUtils.isNullHandlingEnabled(_queryOptions));
+      queryContext.setNativeEngineEnabled(QueryOptionsUtils.isNativeEngineEnabled(_queryOptions));
       queryContext.setServerReturnFinalResult(QueryOptionsUtils.isServerReturnFinalResult(_queryOptions));
       queryContext.setServerReturnFinalResultKeyUnpartitioned(
           QueryOptionsUtils.isServerReturnFinalResultKeyUnpartitioned(_queryOptions));
@@ -678,7 +691,8 @@ public class QueryContext {
         }
         int functionIndex = filteredAggregationFunctions.size();
         AggregationFunction aggregationFunction =
-            AggregationFunctionFactory.getAggregationFunction(aggregation, queryContext._nullHandlingEnabled);
+            AggregationFunctionFactory.getAggregationFunction(aggregation, queryContext._nullHandlingEnabled,
+                queryContext._nativeEngineEnabled);
         filteredAggregationFunctions.add(Pair.of(aggregationFunction, filter));
         filteredAggregationsIndexMap.put(Pair.of(aggregation, filter), functionIndex);
       }
@@ -699,7 +713,8 @@ public class QueryContext {
           FilterContext filter = pair.getRight();
           int functionIndex = filteredAggregationFunctions.size();
           AggregationFunction aggregationFunction =
-              AggregationFunctionFactory.getAggregationFunction(aggregation, queryContext._nullHandlingEnabled);
+              AggregationFunctionFactory.getAggregationFunction(aggregation, queryContext._nullHandlingEnabled,
+                  queryContext._nativeEngineEnabled);
           filteredAggregationFunctions.add(Pair.of(aggregationFunction, filter));
           filteredAggregationsIndexMap.put(Pair.of(aggregation, filter), functionIndex);
         }

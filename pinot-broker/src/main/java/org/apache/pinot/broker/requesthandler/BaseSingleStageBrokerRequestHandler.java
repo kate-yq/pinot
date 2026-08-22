@@ -760,6 +760,7 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
     if (offlineBrokerRequest != null) {
       Map<String, String> queryOptions = offlineBrokerRequest.getPinotQuery().getQueryOptions();
       setMaxServerResponseSizeBytes(numServers, queryOptions, offlineTableQueryConfig);
+      setNativeEngineEnabled(queryOptions, offlineTableQueryConfig);
       // Set the query option to directly return final result for single server query unless it is explicitly disabled
       if (numServers == 1) {
         // Set the same flag in the original server request to be used in the reduce phase for hybrid table
@@ -773,6 +774,7 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
     if (realtimeBrokerRequest != null) {
       Map<String, String> queryOptions = realtimeBrokerRequest.getPinotQuery().getQueryOptions();
       setMaxServerResponseSizeBytes(numServers, queryOptions, realtimeTableQueryConfig);
+      setNativeEngineEnabled(queryOptions, realtimeTableQueryConfig);
       // Set the query option to directly return final result for single server query unless it is explicitly disabled
       if (numServers == 1) {
         // Set the same flag in the original server request to be used in the reduce phase for hybrid table
@@ -2042,6 +2044,25 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
       queryOptions.put(QueryOptionKey.MAX_SERVER_RESPONSE_SIZE_BYTES,
           Long.toString(DataSizeUtils.toBytes(maxQueryResponseSizeBrokerConfig) / numServers));
     }
+  }
+
+  /**
+   * Resolves the native (Rust/JNI) execution-engine gate for the server and stamps it as an internal
+   * query option. Sourced solely from the table {@link QueryConfig#getNativeEngineEnabled()}; when the
+   * table config does not specify it (i.e. {@code null}), native execution defaults to {@code false}
+   * (off).
+   *
+   * <p>This is <b>not</b> a user-facing option: any client-supplied value is overwritten here so
+   * native execution cannot be toggled per query. Even when enabled, the server applies a per-query
+   * eligibility check and falls back to the Java engine for unsupported query shapes.
+   */
+  private void setNativeEngineEnabled(Map<String, String> queryOptions, @Nullable QueryConfig queryConfig) {
+    boolean enabled = false;
+    if (queryConfig != null && queryConfig.getNativeEngineEnabled() != null) {
+      enabled = queryConfig.getNativeEngineEnabled();
+    }
+    // Authoritatively stamp the resolved value, replacing any client-supplied option.
+    queryOptions.put(QueryOptionKey.NATIVE_ENGINE_ENABLED, Boolean.toString(enabled));
   }
 
   /**

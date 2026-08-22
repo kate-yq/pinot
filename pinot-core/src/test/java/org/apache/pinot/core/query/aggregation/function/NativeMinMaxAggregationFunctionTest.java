@@ -30,7 +30,6 @@ import org.apache.pinot.core.query.aggregation.AggregationResultHolder;
 import org.apache.pinot.core.query.aggregation.DoubleAggregationResultHolder;
 import org.apache.pinot.nativeengine.agg.PinotNativeAgg;
 import org.testng.SkipException;
-import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
@@ -45,7 +44,6 @@ import static org.testng.Assert.assertTrue;
  */
 public class NativeMinMaxAggregationFunctionTest {
 
-  private static final String NATIVE_FLAG = NativeAggregationRouter.ENABLED_PROPERTY;
   private static final String LIB_PATH_PROP = "pinot.native.lib.path";
 
   static {
@@ -56,17 +54,11 @@ public class NativeMinMaxAggregationFunctionTest {
   }
 
   @BeforeClass
-  public void enableNativeFlag() {
+  public void checkNativeAvailable() {
     if (!PinotNativeAgg.isAvailable()) {
       throw new SkipException("pinot-native library not loadable. Build it with "
           + "'./mvnw -pl pinot-native package' first.");
     }
-    System.setProperty(NATIVE_FLAG, "true");
-  }
-
-  @AfterClass(alwaysRun = true)
-  public void clearNativeFlag() {
-    System.clearProperty(NATIVE_FLAG);
   }
 
   // --- factory routing -----------------------------------------------------
@@ -74,7 +66,7 @@ public class NativeMinMaxAggregationFunctionTest {
   @Test
   public void factoryReturnsNativeMinWhenEligible() {
     FunctionContext fc = function("MIN", "longCol");
-    AggregationFunction fn = AggregationFunctionFactory.getAggregationFunction(fc, false);
+    AggregationFunction fn = AggregationFunctionFactory.getAggregationFunction(fc, false, true);
     assertTrue(fn instanceof NativeMinAggregationFunction,
         "expected NativeMinAggregationFunction, got " + fn.getClass().getName());
   }
@@ -82,7 +74,7 @@ public class NativeMinMaxAggregationFunctionTest {
   @Test
   public void factoryReturnsNativeMaxWhenEligible() {
     FunctionContext fc = function("MAX", "doubleCol");
-    AggregationFunction fn = AggregationFunctionFactory.getAggregationFunction(fc, false);
+    AggregationFunction fn = AggregationFunctionFactory.getAggregationFunction(fc, false, true);
     assertTrue(fn instanceof NativeMaxAggregationFunction,
         "expected NativeMaxAggregationFunction, got " + fn.getClass().getName());
   }
@@ -90,7 +82,7 @@ public class NativeMinMaxAggregationFunctionTest {
   @Test
   public void factoryFallsBackToJavaForMinWhenNullHandlingEnabled() {
     FunctionContext fc = function("MIN", "longCol");
-    AggregationFunction fn = AggregationFunctionFactory.getAggregationFunction(fc, true);
+    AggregationFunction fn = AggregationFunctionFactory.getAggregationFunction(fc, true, true);
     assertEquals(fn.getClass(), MinAggregationFunction.class);
   }
 

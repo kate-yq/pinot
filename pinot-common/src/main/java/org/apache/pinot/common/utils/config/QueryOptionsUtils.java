@@ -138,6 +138,15 @@ public class QueryOptionsUtils {
     return Boolean.parseBoolean(queryOptions.get(QueryOptionKey.SKIP_UPSERT));
   }
 
+  /**
+   * Whether the native (Rust/JNI) execution engine is enabled for this query. Broker-internal option
+   * stamped from table/cluster config (never client-controlled). Defaults to {@code false}. The server
+   * still applies a per-query eligibility check before actually routing to the native path.
+   */
+  public static boolean isNativeEngineEnabled(Map<String, String> queryOptions) {
+    return Boolean.parseBoolean(queryOptions.get(QueryOptionKey.NATIVE_ENGINE_ENABLED));
+  }
+
   public static boolean isSkipUpsertView(Map<String, String> queryOptions) {
     return Boolean.parseBoolean(queryOptions.get(QueryOptionKey.SKIP_UPSERT_VIEW));
   }

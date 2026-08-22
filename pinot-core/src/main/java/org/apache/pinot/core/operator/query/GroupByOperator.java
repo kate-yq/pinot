@@ -157,7 +157,7 @@ public class GroupByOperator extends BaseOperator<GroupByResultsBlock> {
     }
 
     GroupByResultsBlock resultsBlock;
-    if (groupByExecutor instanceof NativeGroupByExecutor && NativeGroupByCombineRouter.isEnabled()) {
+    if (groupByExecutor instanceof NativeGroupByExecutor && NativeGroupByCombineRouter.isEnabled(_queryContext)) {
       // Boundary-1 fast path: hand primitive columnar arrays to the native combine (no boxed
       // AggregationGroupByResult / GroupByResultHolder / per-group Object[] key iterator).
       NativeSegmentResult nativeResult = ((NativeGroupByExecutor) groupByExecutor).buildNativeSegmentResult();

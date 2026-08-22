@@ -59,8 +59,24 @@ public class AggregationFunctionFactory {
   /**
    * Given the function information, returns a new instance of the corresponding aggregation function.
    * <p>NOTE: Underscores in the function name are ignored.
+   * <p>Backward-compatible overload; never routes to the native engine (equivalent to the native
+   * engine being disabled). Callers on the query execution path use the 3-arg overload so the
+   * native (Rust/JNI) path can be selected when enabled by config.
    */
   public static AggregationFunction getAggregationFunction(FunctionContext function, boolean nullHandlingEnabled) {
+    return getAggregationFunction(function, nullHandlingEnabled, false);
+  }
+
+  /**
+   * Given the function information, returns a new instance of the corresponding aggregation function.
+   * <p>NOTE: Underscores in the function name are ignored.
+   *
+   * @param nativeEngineEnabled when {@code true}, eligible functions may be constructed on the native
+   *        (Rust+JNI) path (see {@link NativeAggregationRouter}); when {@code false} the standard Java
+   *        functions are always used. Resolved from table/cluster config on the server.
+   */
+  public static AggregationFunction getAggregationFunction(FunctionContext function, boolean nullHandlingEnabled,
+      boolean nativeEngineEnabled) {
     try {
       String upperCaseFunctionName =
           AggregationFunctionType.getNormalizedAggregationFunctionName(function.getFunctionName());
@@ -70,7 +86,8 @@ public class AggregationFunctionFactory {
       // Single integration point for the native (Rust+JNI) acceleration path. See
       // NativeAggregationRouter for eligibility rules. When disabled or ineligible,
       // construction falls through to the standard Java factory branches below.
-      if (NativeAggregationRouter.shouldAccelerate(upperCaseFunctionName, arguments, nullHandlingEnabled)) {
+      if (NativeAggregationRouter.shouldAccelerate(upperCaseFunctionName, arguments, nullHandlingEnabled,
+          nativeEngineEnabled)) {
         return NativeAggregationRouter.createNative(upperCaseFunctionName, arguments, nullHandlingEnabled);
       }
       if (upperCaseFunctionName.startsWith("PERCENTILE")) {

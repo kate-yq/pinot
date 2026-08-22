@@ -26,12 +26,12 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import javax.annotation.Nullable;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.common.response.broker.ResultTable;
-import org.apache.pinot.core.query.aggregation.groupby.NativeGroupByRouter;
 import org.apache.pinot.nativeengine.groupby.PinotNativeGroupBy;
 import org.apache.pinot.segment.local.indexsegment.immutable.ImmutableSegmentLoader;
 import org.apache.pinot.segment.local.segment.creator.impl.SegmentIndexCreationDriverImpl;
@@ -44,6 +44,7 @@ import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.data.readers.GenericRow;
+import org.apache.pinot.spi.utils.CommonConstants.Broker.Request.QueryOptionKey;
 import org.apache.pinot.spi.utils.ReadMode;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.testng.SkipException;
@@ -74,6 +75,10 @@ public class NativeGroupByQueriesTest extends BaseQueriesTest {
   private static final String RAW_TABLE_NAME = "testTable";
   private static final String SEGMENT_NAME = "testSegment";
   private static final String LIB_PATH_PROP = "pinot.native.lib.path";
+
+  // Enables the native engine the way production does — via the broker-stamped internal query option
+  // (resolved from table/cluster config). No system property / global state involved.
+  private static final Map<String, String> NATIVE_ON = Map.of(QueryOptionKey.NATIVE_ENGINE_ENABLED, "true");
 
   private static final String KEY_COL = "keyCol";
   private static final String KEY_COL2 = "keyCol2";
@@ -195,7 +200,6 @@ public class NativeGroupByQueriesTest extends BaseQueriesTest {
   @AfterClass(alwaysRun = true)
   public void tearDown()
       throws Exception {
-    System.clearProperty(NativeGroupByRouter.ENABLED_PROPERTY);
     if (_indexSegment != null) {
       _indexSegment.destroy();
     }
@@ -204,16 +208,8 @@ public class NativeGroupByQueriesTest extends BaseQueriesTest {
 
   @Test
   public void nativeGroupByMatchesJava() {
-    System.clearProperty(NativeGroupByRouter.ENABLED_PROPERTY);
     ResultTable javaResult = getBrokerResponse(GROUP_BY_QUERY).getResultTable();
-
-    System.setProperty(NativeGroupByRouter.ENABLED_PROPERTY, "true");
-    ResultTable nativeResult;
-    try {
-      nativeResult = getBrokerResponse(GROUP_BY_QUERY).getResultTable();
-    } finally {
-      System.clearProperty(NativeGroupByRouter.ENABLED_PROPERTY);
-    }
+    ResultTable nativeResult = getBrokerResponse(GROUP_BY_QUERY, NATIVE_ON).getResultTable();
 
     assertEquals(nativeResult.getDataSchema().toString(), javaResult.getDataSchema().toString(),
         "result schema differs between native and Java paths");
@@ -224,16 +220,8 @@ public class NativeGroupByQueriesTest extends BaseQueriesTest {
 
   @Test
   public void nativeMultiColumnGroupByMatchesJava() {
-    System.clearProperty(NativeGroupByRouter.ENABLED_PROPERTY);
     ResultTable javaResult = getBrokerResponse(MULTI_GROUP_BY_QUERY).getResultTable();
-
-    System.setProperty(NativeGroupByRouter.ENABLED_PROPERTY, "true");
-    ResultTable nativeResult;
-    try {
-      nativeResult = getBrokerResponse(MULTI_GROUP_BY_QUERY).getResultTable();
-    } finally {
-      System.clearProperty(NativeGroupByRouter.ENABLED_PROPERTY);
-    }
+    ResultTable nativeResult = getBrokerResponse(MULTI_GROUP_BY_QUERY, NATIVE_ON).getResultTable();
 
     assertEquals(nativeResult.getDataSchema().toString(), javaResult.getDataSchema().toString(),
         "multi-column result schema differs between native and Java paths");
@@ -252,16 +240,8 @@ public class NativeGroupByQueriesTest extends BaseQueriesTest {
    */
   @Test
   public void nativeStringGroupByMatchesJava() {
-    System.clearProperty(NativeGroupByRouter.ENABLED_PROPERTY);
     ResultTable javaResult = getBrokerResponse(STRING_GROUP_BY_QUERY).getResultTable();
-
-    System.setProperty(NativeGroupByRouter.ENABLED_PROPERTY, "true");
-    ResultTable nativeResult;
-    try {
-      nativeResult = getBrokerResponse(STRING_GROUP_BY_QUERY).getResultTable();
-    } finally {
-      System.clearProperty(NativeGroupByRouter.ENABLED_PROPERTY);
-    }
+    ResultTable nativeResult = getBrokerResponse(STRING_GROUP_BY_QUERY, NATIVE_ON).getResultTable();
 
     assertEquals(nativeResult.getDataSchema().toString(), javaResult.getDataSchema().toString(),
         "STRING-key result schema differs between native and Java paths");
@@ -276,16 +256,8 @@ public class NativeGroupByQueriesTest extends BaseQueriesTest {
    */
   @Test
   public void nativeStringMultiColumnGroupByMatchesJava() {
-    System.clearProperty(NativeGroupByRouter.ENABLED_PROPERTY);
     ResultTable javaResult = getBrokerResponse(STRING_MULTI_GROUP_BY_QUERY).getResultTable();
-
-    System.setProperty(NativeGroupByRouter.ENABLED_PROPERTY, "true");
-    ResultTable nativeResult;
-    try {
-      nativeResult = getBrokerResponse(STRING_MULTI_GROUP_BY_QUERY).getResultTable();
-    } finally {
-      System.clearProperty(NativeGroupByRouter.ENABLED_PROPERTY);
-    }
+    ResultTable nativeResult = getBrokerResponse(STRING_MULTI_GROUP_BY_QUERY, NATIVE_ON).getResultTable();
 
     assertEquals(nativeResult.getDataSchema().toString(), javaResult.getDataSchema().toString(),
         "STRING multi-column result schema differs between native and Java paths");

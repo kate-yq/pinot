@@ -29,7 +29,6 @@ import org.apache.pinot.core.query.aggregation.AggregationResultHolder;
 import org.apache.pinot.core.query.aggregation.DoubleAggregationResultHolder;
 import org.apache.pinot.nativeengine.agg.PinotNativeAgg;
 import org.testng.SkipException;
-import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
@@ -47,7 +46,6 @@ import static org.testng.Assert.assertTrue;
  */
 public class NativeCountAggregationFunctionTest {
 
-  private static final String NATIVE_FLAG = NativeAggregationRouter.ENABLED_PROPERTY;
   private static final String LIB_PATH_PROP = "pinot.native.lib.path";
 
   static {
@@ -58,24 +56,18 @@ public class NativeCountAggregationFunctionTest {
   }
 
   @BeforeClass
-  public void enableNativeFlag() {
+  public void checkNativeAvailable() {
     if (!PinotNativeAgg.isAvailable()) {
       throw new SkipException("pinot-native library not loadable. Build it with "
           + "'./mvnw -pl pinot-native package' first.");
     }
-    System.setProperty(NATIVE_FLAG, "true");
-  }
-
-  @AfterClass(alwaysRun = true)
-  public void clearNativeFlag() {
-    System.clearProperty(NATIVE_FLAG);
   }
 
   @Test
   public void factoryReturnsNativeCountForCountStar() {
     FunctionContext fc = new FunctionContext(FunctionContext.Type.AGGREGATION, "COUNT",
         Collections.singletonList(ExpressionContext.forIdentifier("*")));
-    AggregationFunction fn = AggregationFunctionFactory.getAggregationFunction(fc, false);
+    AggregationFunction fn = AggregationFunctionFactory.getAggregationFunction(fc, false, true);
     assertTrue(fn instanceof NativeCountAggregationFunction,
         "expected NativeCountAggregationFunction, got " + fn.getClass().getName());
   }
@@ -84,7 +76,7 @@ public class NativeCountAggregationFunctionTest {
   public void factoryReturnsNativeCountForCountColumn() {
     FunctionContext fc = new FunctionContext(FunctionContext.Type.AGGREGATION, "COUNT",
         Collections.singletonList(ExpressionContext.forIdentifier("col")));
-    AggregationFunction fn = AggregationFunctionFactory.getAggregationFunction(fc, false);
+    AggregationFunction fn = AggregationFunctionFactory.getAggregationFunction(fc, false, true);
     assertTrue(fn instanceof NativeCountAggregationFunction,
         "expected NativeCountAggregationFunction, got " + fn.getClass().getName());
   }
@@ -93,7 +85,7 @@ public class NativeCountAggregationFunctionTest {
   public void factoryFallsBackToJavaWhenNullHandlingEnabled() {
     FunctionContext fc = new FunctionContext(FunctionContext.Type.AGGREGATION, "COUNT",
         Collections.singletonList(ExpressionContext.forIdentifier("col")));
-    AggregationFunction fn = AggregationFunctionFactory.getAggregationFunction(fc, true);
+    AggregationFunction fn = AggregationFunctionFactory.getAggregationFunction(fc, true, true);
     assertEquals(fn.getClass(), CountAggregationFunction.class);
   }
 

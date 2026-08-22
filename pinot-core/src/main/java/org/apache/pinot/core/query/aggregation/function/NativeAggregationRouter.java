@@ -30,7 +30,8 @@ import org.apache.pinot.nativeengine.agg.PinotNativeAgg;
  *
  * <p>Eligibility checks (short-circuiting):
  * <ol>
- *   <li>Feature flag {@code pinot.native.aggregation.enabled} is set to {@code true}</li>
+ *   <li>The native engine is enabled for this query (resolved from table/cluster config and passed
+ *       to {@code shouldAccelerate} as {@code nativeEngineEnabled})</li>
  *   <li>The native library loaded successfully ({@link PinotNativeAgg#isAvailable()})</li>
  *   <li>Null handling is disabled (no native null path yet)</li>
  *   <li>Function type is in the Phase 1.B scope: {@code SUM} / {@code SUM0} / {@code MIN} /
@@ -50,20 +51,20 @@ import org.apache.pinot.nativeengine.agg.PinotNativeAgg;
  */
 public final class NativeAggregationRouter {
 
-  /** System property gating the native engine. Default {@code false}. */
-  public static final String ENABLED_PROPERTY = "pinot.native.aggregation.enabled";
-
   private NativeAggregationRouter() {
   }
 
   /**
    * @return {@code true} if a native AggregationFunction should be constructed for the
    *         given function name + arguments. Caller must use {@link #createNative} to do so.
+   *
+   * @param nativeEngineEnabled the resolved table/cluster gate for the native engine. When
+   *        {@code false}, the native path is never taken regardless of eligibility.
    */
   public static boolean shouldAccelerate(
       String upperCaseFunctionName, List<ExpressionContext> arguments,
-      boolean nullHandlingEnabled) {
-    if (!enabled()) {
+      boolean nullHandlingEnabled, boolean nativeEngineEnabled) {
+    if (!nativeEngineEnabled) {
       return false;
     }
     if (!PinotNativeAgg.isAvailable()) {
@@ -103,10 +104,6 @@ public final class NativeAggregationRouter {
             "Native AggregationFunction requested for unsupported function: "
                 + upperCaseFunctionName);
     }
-  }
-
-  static boolean enabled() {
-    return Boolean.getBoolean(ENABLED_PROPERTY);
   }
 
   private static boolean isInScopeFunction(String upperCaseFunctionName) {

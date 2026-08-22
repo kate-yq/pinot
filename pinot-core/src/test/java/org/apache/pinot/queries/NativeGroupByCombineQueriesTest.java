@@ -24,6 +24,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -33,6 +34,7 @@ import javax.annotation.Nullable;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.common.response.broker.ResultTable;
 import org.apache.pinot.core.operator.combine.NativeGroupByCombineRouter;
+import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.core.query.request.context.utils.QueryContextConverterUtils;
 import org.apache.pinot.nativeengine.groupby.PinotNativeGroupByCombine;
 import org.apache.pinot.segment.local.indexsegment.immutable.ImmutableSegmentLoader;
@@ -87,7 +89,9 @@ public class NativeGroupByCombineQueriesTest extends BaseQueriesTest {
   private static final String RAW_TABLE_NAME = "testTable";
   private static final String SEGMENT_NAME = "testSegment";
   private static final String LIB_PATH_PROP = "pinot.native.lib.path";
-  private static final String ENABLED_PROPERTY = NativeGroupByCombineRouter.ENABLED_PROPERTY;
+
+  // Enables the native engine via the broker-stamped internal query option (as production does).
+  private static final Map<String, String> NATIVE_ON = Map.of(QueryOptionKey.NATIVE_ENGINE_ENABLED, "true");
 
   private static final String KEY_COL = "keyCol";
   private static final String KEY_COL2 = "keyCol2";
@@ -102,7 +106,6 @@ public class NativeGroupByCombineQueriesTest extends BaseQueriesTest {
   private static final int ORDER_BY_LIMIT = 25;
 
   private static final String MULTICOL_PROPERTY = "pinot.native.groupby.combine.multicol";
-  private static final String SEGMENT_ENABLED_PROPERTY = "pinot.native.groupby.enabled";
 
   /** {@code SELECT keyCol, SUM(longVal), MIN(intVal), MAX(doubleVal), COUNT(*) FROM testTable }. */
   private static final String SELECT =
@@ -146,8 +149,6 @@ public class NativeGroupByCombineQueriesTest extends BaseQueriesTest {
   @AfterMethod
   public void cleanup()
       throws Exception {
-    System.clearProperty(ENABLED_PROPERTY);
-    System.clearProperty(SEGMENT_ENABLED_PROPERTY);
     System.clearProperty(MULTICOL_PROPERTY);
     if (_indexSegment != null) {
       _indexSegment.destroy();
@@ -245,20 +246,10 @@ public class NativeGroupByCombineQueriesTest extends BaseQueriesTest {
     // LIMIT >= the full distinct cross-product (bounded by NUM_ROWS) → every group returned, deterministic.
     String query = twoKeySelect + "GROUP BY " + KEY_COL + ", " + KEY_COL2 + " LIMIT 100000";
 
-    System.clearProperty(ENABLED_PROPERTY);
-    System.clearProperty(SEGMENT_ENABLED_PROPERTY);
     ResultTable javaResult = getBrokerResponse(query).getResultTable();
     assertFalse(javaResult.getRows().isEmpty(), "expected a non-empty Java result");
 
-    System.setProperty(SEGMENT_ENABLED_PROPERTY, "true");
-    System.setProperty(ENABLED_PROPERTY, "true");
-    ResultTable nativeResult;
-    try {
-      nativeResult = getBrokerResponse(query).getResultTable();
-    } finally {
-      System.clearProperty(ENABLED_PROPERTY);
-      System.clearProperty(SEGMENT_ENABLED_PROPERTY);
-    }
+    ResultTable nativeResult = getBrokerResponse(query, NATIVE_ON).getResultTable();
     assertEquals(nativeResult.getDataSchema().toString(), javaResult.getDataSchema().toString(),
         "end-to-end: result schema differs");
     assertEquals(rowSet(nativeResult), rowSet(javaResult), "end-to-end native (segment+combine) rows differ");
@@ -270,19 +261,12 @@ public class NativeGroupByCombineQueriesTest extends BaseQueriesTest {
    * accelerates the native run (so the comparison is not vacuously Java-vs-Java).
    */
   private void assertParity(String query, @Nullable Map<String, String> options, boolean ordered, String tag) {
-    System.clearProperty(ENABLED_PROPERTY);
     ResultTable javaResult = getBrokerResponse(query, options).getResultTable();
     assertFalse(javaResult.getRows().isEmpty(), tag + ": expected a non-empty Java result");
 
-    System.setProperty(ENABLED_PROPERTY, "true");
-    ResultTable nativeResult;
-    try {
-      assertTrue(NativeGroupByCombineRouter.shouldAccelerate(QueryContextConverterUtils.getQueryContext(query)),
-          tag + ": router did not accelerate — native combine path was not exercised");
-      nativeResult = getBrokerResponse(query, options).getResultTable();
-    } finally {
-      System.clearProperty(ENABLED_PROPERTY);
-    }
+    assertTrue(NativeGroupByCombineRouter.shouldAccelerate(nativeQueryContext(query)),
+        tag + ": router did not accelerate — native combine path was not exercised");
+    ResultTable nativeResult = getBrokerResponse(query, withNative(options)).getResultTable();
 
     assertEquals(nativeResult.getDataSchema().toString(), javaResult.getDataSchema().toString(),
         tag + ": result schema differs");
@@ -296,33 +280,50 @@ public class NativeGroupByCombineQueriesTest extends BaseQueriesTest {
   /** The router accepts the supported shapes and rejects out-of-scope ones (design §26.7/§29.2). */
   @Test
   public void routerGating() {
-    System.setProperty(ENABLED_PROPERTY, "true");
-    try {
-      // Accepted: single key, SUM/MIN/MAX/COUNT, no HAVING, ORDER BY over group key / aggregation.
-      assertTrue(accelerates(SELECT + "GROUP BY " + KEY_COL + " LIMIT 10"), "no-order-by should accelerate");
-      assertTrue(accelerates(SELECT + "GROUP BY " + KEY_COL + " ORDER BY COUNT(*) DESC LIMIT 10"),
-          "order-by-agg should accelerate");
-      assertTrue(accelerates(SELECT + "GROUP BY " + KEY_COL + " ORDER BY " + KEY_COL + " ASC LIMIT 10"),
-          "order-by-key should accelerate");
+    // Accepted: single key, SUM/MIN/MAX/COUNT, no HAVING, ORDER BY over group key / aggregation.
+    assertTrue(accelerates(SELECT + "GROUP BY " + KEY_COL + " LIMIT 10"), "no-order-by should accelerate");
+    assertTrue(accelerates(SELECT + "GROUP BY " + KEY_COL + " ORDER BY COUNT(*) DESC LIMIT 10"),
+        "order-by-agg should accelerate");
+    assertTrue(accelerates(SELECT + "GROUP BY " + KEY_COL + " ORDER BY " + KEY_COL + " ASC LIMIT 10"),
+        "order-by-key should accelerate");
 
-      assertTrue(accelerates("SELECT " + KEY_COL + ", " + KEY_COL2 + ", COUNT(*) FROM " + RAW_TABLE_NAME
-          + " GROUP BY " + KEY_COL + ", " + KEY_COL2 + " LIMIT 10"), "multi-key should accelerate");
+    assertTrue(accelerates("SELECT " + KEY_COL + ", " + KEY_COL2 + ", COUNT(*) FROM " + RAW_TABLE_NAME
+        + " GROUP BY " + KEY_COL + ", " + KEY_COL2 + " LIMIT 10"), "multi-key should accelerate");
 
-      // Rejected: HAVING, post-aggregation order key, unsupported aggregation.
-      assertFalse(accelerates(
-              SELECT + "GROUP BY " + KEY_COL + " HAVING COUNT(*) > 5 LIMIT 10"), "HAVING should not accelerate");
-      assertFalse(accelerates(
-              SELECT + "GROUP BY " + KEY_COL + " ORDER BY SUM(" + LONG_VAL + ") + 1 DESC LIMIT 10"),
-          "post-aggregation order key should not accelerate");
-      assertFalse(accelerates("SELECT " + KEY_COL + ", AVG(" + LONG_VAL + ") FROM " + RAW_TABLE_NAME
-          + " GROUP BY " + KEY_COL + " LIMIT 10"), "unsupported aggregation should not accelerate");
-    } finally {
-      System.clearProperty(ENABLED_PROPERTY);
-    }
+    // Rejected: HAVING, post-aggregation order key, unsupported aggregation.
+    assertFalse(accelerates(
+            SELECT + "GROUP BY " + KEY_COL + " HAVING COUNT(*) > 5 LIMIT 10"), "HAVING should not accelerate");
+    assertFalse(accelerates(
+            SELECT + "GROUP BY " + KEY_COL + " ORDER BY SUM(" + LONG_VAL + ") + 1 DESC LIMIT 10"),
+        "post-aggregation order key should not accelerate");
+    assertFalse(accelerates("SELECT " + KEY_COL + ", AVG(" + LONG_VAL + ") FROM " + RAW_TABLE_NAME
+        + " GROUP BY " + KEY_COL + " LIMIT 10"), "unsupported aggregation should not accelerate");
+
+    // The gate itself: with the native engine disabled, even a fully-eligible query must not accelerate.
+    assertFalse(NativeGroupByCombineRouter.shouldAccelerate(
+            QueryContextConverterUtils.getQueryContext(SELECT + "GROUP BY " + KEY_COL + " LIMIT 10")),
+        "native engine disabled should not accelerate");
   }
 
   private static boolean accelerates(String query) {
-    return NativeGroupByCombineRouter.shouldAccelerate(QueryContextConverterUtils.getQueryContext(query));
+    return NativeGroupByCombineRouter.shouldAccelerate(nativeQueryContext(query));
+  }
+
+  /** A QueryContext with the native engine enabled, mirroring the broker-stamped option at runtime. */
+  private static QueryContext nativeQueryContext(String query) {
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
+    queryContext.setNativeEngineEnabled(true);
+    return queryContext;
+  }
+
+  /** {@code options} plus the native-engine gate, for the native leg of a parity comparison. */
+  private static Map<String, String> withNative(@Nullable Map<String, String> options) {
+    Map<String, String> merged = new HashMap<>();
+    if (options != null) {
+      merged.putAll(options);
+    }
+    merged.put(QueryOptionKey.NATIVE_ENGINE_ENABLED, "true");
+    return merged;
   }
 
   private void buildSegments(DataType keyType)
