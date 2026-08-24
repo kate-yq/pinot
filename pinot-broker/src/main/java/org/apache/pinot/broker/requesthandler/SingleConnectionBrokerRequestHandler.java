@@ -18,12 +18,16 @@
  */
 package org.apache.pinot.broker.requesthandler;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Maps;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import javax.annotation.concurrent.ThreadSafe;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.hc.core5.http.io.support.ClassicRequestBuilder;
 import org.apache.pinot.broker.broker.AccessControlFactory;
 import org.apache.pinot.broker.queryquota.QueryQuotaManager;
 import org.apache.pinot.common.config.NettyConfig;
@@ -36,7 +40,9 @@ import org.apache.pinot.common.metrics.BrokerQueryPhase;
 import org.apache.pinot.common.request.BrokerRequest;
 import org.apache.pinot.common.response.broker.BrokerResponseNative;
 import org.apache.pinot.common.response.broker.QueryProcessingException;
+import org.apache.pinot.common.utils.SimpleHttpResponse;
 import org.apache.pinot.common.utils.config.QueryOptionsUtils;
+import org.apache.pinot.common.utils.http.HttpClient;
 import org.apache.pinot.core.query.reduce.BrokerReduceService;
 import org.apache.pinot.core.routing.RoutingManager;
 import org.apache.pinot.core.transport.AsyncQueryResponse;
@@ -68,6 +74,8 @@ public class SingleConnectionBrokerRequestHandler extends BaseSingleStageBrokerR
   private final BrokerReduceService _brokerReduceService;
   private final QueryRouter _queryRouter;
   private final FailureDetector _failureDetector;
+  // Connect + read timeout for the HTTP readiness health probe used by the unhealthy-server recovery check.
+  private static final int HEALTH_PROBE_TIMEOUT_MS = 2000;
 
   public SingleConnectionBrokerRequestHandler(PinotConfiguration config, String brokerId,
       BrokerRequestIdGenerator requestIdGenerator, RoutingManager routingManager,
@@ -135,11 +143,18 @@ public class SingleConnectionBrokerRequestHandler extends BaseSingleStageBrokerR
     for (Map.Entry<ServerRoutingInstance, ServerResponse> entry : finalResponses.entrySet()) {
       ServerResponse serverResponse = entry.getValue();
       DataTable dataTable = serverResponse.getDataTable();
+      String instanceId = entry.getKey().getInstanceId();
       if (dataTable != null) {
         dataTableMap.put(entry.getKey(), dataTable);
         totalResponseSize += serverResponse.getResponseSize();
+        // Server responded: clear any accumulated consecutive-failure count.
+        _failureDetector.notifyServerResponded(instanceId);
       } else {
         serversNotResponded.add(entry.getKey());
+        // Server failed to respond (e.g. query timed out while the server was still TCP-connected). Feed this into
+        // the failure detector so a silent-but-connected server can be quarantined after repeated failures, without
+        // waiting for a transport-level channelInactive event.
+        _failureDetector.notifyServerNotResponded(instanceId);
       }
     }
     int numServersResponded = dataTableMap.size();
@@ -196,12 +211,52 @@ public class SingleConnectionBrokerRequestHandler extends BaseSingleStageBrokerR
       return FailureDetector.ServerState.UNKNOWN;
     }
 
-    if (_queryRouter.connect(serverInstance)) {
-      LOGGER.info("Successfully connect to server: {}, marking it healthy", instanceId);
-      return FailureDetector.ServerState.HEALTHY;
-    } else {
+    // First gate: a transport connection must be establishable.
+    if (!_queryRouter.connect(serverInstance)) {
       LOGGER.warn("Still cannot connect to server: {}, retry later", instanceId);
       return FailureDetector.ServerState.UNHEALTHY;
+    }
+
+    // Second gate: a bare TCP connect can succeed against a half-dead server whose kernel still completes the
+    // handshake while the query engine cannot serve. Require the server to report readiness via its admin endpoint so
+    // we don't prematurely re-admit (and flap) such a server.
+    if (!isServerReady(serverInstance)) {
+      return FailureDetector.ServerState.UNHEALTHY;
+    }
+
+    LOGGER.info("Successfully probed server: {}, marking it healthy", instanceId);
+    return FailureDetector.ServerState.HEALTHY;
+  }
+
+  /**
+   * Application-level health probe: issues an HTTP GET to the server admin {@code /health/readiness} endpoint and
+   * treats a 200 response as ready. Returns {@code true} (does not block recovery) when the admin endpoint is
+   * unknown, since in that case we fall back to the transport-level connect check only.
+   */
+  private boolean isServerReady(ServerInstance serverInstance) {
+    String adminEndpoint = serverInstance.getAdminEndpoint();
+    if (StringUtils.isBlank(adminEndpoint)) {
+      LOGGER.debug("No admin endpoint for server: {}, skipping HTTP readiness probe", serverInstance.getInstanceId());
+      return true;
+    }
+    return isServerReadyViaHttp(adminEndpoint, serverInstance.getInstanceId(), HEALTH_PROBE_TIMEOUT_MS);
+  }
+
+  @VisibleForTesting
+  static boolean isServerReadyViaHttp(String adminEndpoint, String instanceId, int timeoutMs) {
+    String url = adminEndpoint + "/health/readiness";
+    try {
+      SimpleHttpResponse response =
+          HttpClient.getInstance().sendRequest(ClassicRequestBuilder.get(new URI(url)).build(), timeoutMs);
+      int statusCode = response.getStatusCode();
+      if (statusCode == 200) {
+        return true;
+      }
+      LOGGER.warn("Readiness probe for server: {} at {} returned status: {}", instanceId, url, statusCode);
+      return false;
+    } catch (Exception e) {
+      LOGGER.warn("Readiness probe failed for server: {} at {}: {}", instanceId, url, e.getMessage());
+      return false;
     }
   }
 }

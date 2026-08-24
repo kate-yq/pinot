@@ -57,6 +57,8 @@ public class ConnectionFailureDetectorTest {
     _brokerMetrics = new BrokerMetrics(PinotMetricUtils.getPinotMetricsRegistry());
     _failureDetector = FailureDetectorFactory.getFailureDetector(config, _brokerMetrics);
     assertTrue(_failureDetector instanceof ConnectionFailureDetector);
+    // These tests exercise the legacy "re-admit on first successful probe" behavior; probation is covered separately.
+    ((BaseExponentialBackoffRetryFailureDetector) _failureDetector).setHealthyThreshold(1);
     _healthyServerNotifier = new HealthyServerNotifier();
     _failureDetector.registerHealthyServerNotifier(_healthyServerNotifier);
     _unhealthyServerNotifier = new UnhealthyServerNotifier();
@@ -323,6 +325,147 @@ public class ConnectionFailureDetectorTest {
     long spreadMs = TimeUnit.NANOSECONDS.toMillis(maxTimeNs - minTimeNs);
     assertTrue(spreadMs < 1_000L,
         "Without jitter, expected schedules bunched within 1s, got " + spreadMs + "ms");
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Fix #1: proactively mark a silent-but-connected server unhealthy after N consecutive no-response queries.
+  // ---------------------------------------------------------------------------------------------------------------
+
+  @Test
+  public void testConsecutiveFailuresTripUnhealthy() {
+    // Default consecutive failures threshold is 5.
+    BaseExponentialBackoffRetryFailureDetector detector = buildUnstartedDetector(0.0, 100);
+    String instanceId = "Server_localhost_2000";
+
+    // First (threshold - 1) failures should not trip.
+    for (int i = 0; i < BaseExponentialBackoffRetryFailureDetector.CONSECUTIVE_FAILURES_THRESHOLD - 1; i++) {
+      detector.notifyServerNotResponded(instanceId);
+      assertTrue(detector.getUnhealthyServers().isEmpty());
+    }
+    // The threshold-th consecutive failure trips it.
+    detector.notifyServerNotResponded(instanceId);
+    assertEquals(detector.getUnhealthyServers(), Collections.singleton(instanceId));
+  }
+
+  @Test
+  public void testSuccessResetsConsecutiveFailures() {
+    BaseExponentialBackoffRetryFailureDetector detector = buildUnstartedDetector(0.0, 100);
+    String instanceId = "Server_localhost_2001";
+
+    for (int i = 0; i < BaseExponentialBackoffRetryFailureDetector.CONSECUTIVE_FAILURES_THRESHOLD - 1; i++) {
+      detector.notifyServerNotResponded(instanceId);
+    }
+    // A successful response resets the counter.
+    detector.notifyServerResponded(instanceId);
+    // Another (threshold - 1) failures should still not trip because the counter was reset.
+    for (int i = 0; i < BaseExponentialBackoffRetryFailureDetector.CONSECUTIVE_FAILURES_THRESHOLD - 1; i++) {
+      detector.notifyServerNotResponded(instanceId);
+    }
+    assertTrue(detector.getUnhealthyServers().isEmpty());
+  }
+
+  @Test
+  public void testConsecutiveFailuresDetectionDisabled() {
+    PinotConfiguration config = new PinotConfiguration();
+    config.setProperty(Broker.FailureDetector.CONFIG_OF_TYPE, Broker.FailureDetector.Type.CONNECTION.name());
+    BrokerMetrics metrics = new BrokerMetrics(PinotMetricUtils.getPinotMetricsRegistry());
+    BaseExponentialBackoffRetryFailureDetector detector =
+        (BaseExponentialBackoffRetryFailureDetector) FailureDetectorFactory.getFailureDetector(config, metrics);
+    detector.setConsecutiveFailuresThreshold(0);
+    detector.registerUnhealthyServerNotifier(id -> { });
+    detector.registerHealthyServerNotifier(id -> { });
+    String instanceId = "Server_localhost_2002";
+    for (int i = 0; i < 100; i++) {
+      detector.notifyServerNotResponded(instanceId);
+    }
+    assertTrue(detector.getUnhealthyServers().isEmpty());
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Fix #4: probation - require N consecutive successful probes before re-admitting, do not flap on a single success.
+  // ---------------------------------------------------------------------------------------------------------------
+
+  @Test
+  public void testProbationRequiresConsecutiveHealthyProbes() {
+    int healthyThreshold = 3;
+    HealthyServerNotifier healthyNotifier = new HealthyServerNotifier();
+    UnhealthyServerNotifier unhealthyNotifier = new UnhealthyServerNotifier();
+    // Retrier that always reports the server as healthy.
+    UnhealthyServerRetrier retrier = new UnhealthyServerRetrier(0);
+    BaseExponentialBackoffRetryFailureDetector detector = buildStartedDetector(healthyThreshold, 100,
+        healthyNotifier, unhealthyNotifier, retrier);
+    try {
+      detector.markServerUnhealthy(INSTANCE_ID);
+      // Server should only be re-admitted (healthy notifier fired) after exactly healthyThreshold successful probes.
+      TestUtils.waitForCondition(aVoid -> healthyNotifier._notifyHealthyServerCalled == 1, 5_000L,
+          "Server was not marked healthy after sustained successful probes");
+      assertEquals(retrier._retryUnhealthyServerCalled, healthyThreshold,
+          "A single successful probe must not re-admit; exactly healthyThreshold probes are required");
+      assertTrue(detector.getUnhealthyServers().isEmpty());
+    } finally {
+      detector.stop();
+    }
+  }
+
+  @Test
+  public void testProbationResetsOnFailedProbe() {
+    int healthyThreshold = 3;
+    HealthyServerNotifier healthyNotifier = new HealthyServerNotifier();
+    UnhealthyServerNotifier unhealthyNotifier = new UnhealthyServerNotifier();
+    // Scripted probe results: H, H, U (resets probation), then H, H, H (recovers). 6 probes total.
+    ScriptedRetrier retrier = new ScriptedRetrier(FailureDetector.ServerState.HEALTHY,
+        FailureDetector.ServerState.HEALTHY, FailureDetector.ServerState.UNHEALTHY, FailureDetector.ServerState.HEALTHY,
+        FailureDetector.ServerState.HEALTHY, FailureDetector.ServerState.HEALTHY);
+    BaseExponentialBackoffRetryFailureDetector detector = buildStartedDetector(healthyThreshold, 100,
+        healthyNotifier, unhealthyNotifier, retrier);
+    try {
+      detector.markServerUnhealthy(INSTANCE_ID);
+      TestUtils.waitForCondition(aVoid -> healthyNotifier._notifyHealthyServerCalled == 1, 5_000L,
+          "Server was not marked healthy after the final 3 consecutive successful probes");
+      // The interrupting failed probe reset the count, so recovery only happened after all 6 scripted probes.
+      assertEquals(retrier._retryUnhealthyServerCalled, 6);
+      assertEquals(healthyNotifier._notifyHealthyServerCalled, 1);
+    } finally {
+      detector.stop();
+    }
+  }
+
+  private BaseExponentialBackoffRetryFailureDetector buildStartedDetector(int healthyThreshold, long retryDelayMs,
+      Consumer<String> healthyNotifier, Consumer<String> unhealthyNotifier,
+      Function<String, FailureDetector.ServerState> retrier) {
+    PinotConfiguration config = new PinotConfiguration();
+    config.setProperty(Broker.FailureDetector.CONFIG_OF_TYPE, Broker.FailureDetector.Type.CONNECTION.name());
+    // The retry initial delay doubles as the probation re-probe cadence.
+    config.setProperty(Broker.FailureDetector.CONFIG_OF_RETRY_INITIAL_DELAY_MS, retryDelayMs);
+    config.setProperty(Broker.FailureDetector.CONFIG_OF_RETRY_DELAY_FACTOR, 1);
+    config.setProperty(Broker.FailureDetector.CONFIG_OF_RETRY_DELAY_JITTER_FACTOR, 0.0);
+    BrokerMetrics metrics = new BrokerMetrics(PinotMetricUtils.getPinotMetricsRegistry());
+    BaseExponentialBackoffRetryFailureDetector detector =
+        (BaseExponentialBackoffRetryFailureDetector) FailureDetectorFactory.getFailureDetector(config, metrics);
+    detector.setHealthyThreshold(healthyThreshold);
+    detector.registerHealthyServerNotifier(healthyNotifier);
+    detector.registerUnhealthyServerNotifier(unhealthyNotifier);
+    detector.registerUnhealthyServerRetrier(retrier);
+    detector.start();
+    return detector;
+  }
+
+  private static class ScriptedRetrier implements Function<String, FailureDetector.ServerState> {
+    int _retryUnhealthyServerCalled = 0;
+    final FailureDetector.ServerState[] _states;
+
+    ScriptedRetrier(FailureDetector.ServerState... states) {
+      _states = states;
+    }
+
+    @Override
+    public FailureDetector.ServerState apply(String instanceId) {
+      assertEquals(instanceId, INSTANCE_ID);
+      FailureDetector.ServerState state =
+          _states[Math.min(_retryUnhealthyServerCalled, _states.length - 1)];
+      _retryUnhealthyServerCalled++;
+      return state;
+    }
   }
 
   @AfterClass

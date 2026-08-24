@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.common.failuredetector;
 
+import com.google.common.annotations.VisibleForTesting;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -26,6 +27,7 @@ import java.util.concurrent.DelayQueue;
 import java.util.concurrent.Delayed;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import javax.annotation.concurrent.ThreadSafe;
@@ -45,9 +47,22 @@ import org.slf4j.LoggerFactory;
 public abstract class BaseExponentialBackoffRetryFailureDetector implements FailureDetector {
   private static final Logger LOGGER = LoggerFactory.getLogger(BaseExponentialBackoffRetryFailureDetector.class);
 
+  // Number of consecutive queries for which a server fails to respond (no data table received) before the server is
+  // proactively marked unhealthy. This detects a silent/half-dead server that is still TCP-connected (so no
+  // channelInactive fires) without waiting for the eventual socket reset. The counter is reset on any successful
+  // response from the server.
+  public static final int CONSECUTIVE_FAILURES_THRESHOLD = 5;
+  // Number of consecutive successful health probes required before an unhealthy server is re-admitted to routing.
+  // Requiring sustained health (a "probation" phase) prevents flapping when a probe transiently succeeds against a
+  // server that still cannot actually serve queries.
+  public static final int HEALTHY_THRESHOLD = 3;
+
   protected final String _name = getClass().getSimpleName();
   protected final ConcurrentHashMap<String, RetryInfo> _unhealthyServerRetryInfoMap = new ConcurrentHashMap<>();
   protected final DelayQueue<RetryInfo> _retryInfoDelayQueue = new DelayQueue<>();
+  // Tracks the number of consecutive queries for which a (currently healthy) server failed to respond. Used to
+  // proactively mark a silent-but-connected server unhealthy without waiting for a transport-level event.
+  protected final ConcurrentHashMap<String, AtomicInteger> _consecutiveNotRespondedMap = new ConcurrentHashMap<>();
 
   protected final List<Function<String, ServerState>> _unhealthyServerRetriers = new ArrayList<>();
   protected Consumer<String> _healthyServerNotifier;
@@ -57,6 +72,9 @@ public abstract class BaseExponentialBackoffRetryFailureDetector implements Fail
   protected double _retryDelayFactor;
   protected double _retryDelayJitterFactor;
   protected int _maxRetries;
+  // Threshold fields default to the hardcoded policy constants; @VisibleForTesting setters allow tests to vary them.
+  protected volatile int _consecutiveFailuresThreshold = CONSECUTIVE_FAILURES_THRESHOLD;
+  protected volatile int _healthyThreshold = HEALTHY_THRESHOLD;
   protected Thread _retryThread;
 
   protected volatile boolean _running;
@@ -75,7 +93,9 @@ public abstract class BaseExponentialBackoffRetryFailureDetector implements Fail
     _maxRetries =
         config.getProperty(Broker.FailureDetector.CONFIG_OF_MAX_RETRIES, Broker.FailureDetector.DEFAULT_MAX_RETRIES);
     LOGGER.info("Initialized {} with retry initial delay: {}ms, exponential backoff factor: {}, jitter factor: {}, "
-            + "max retries: {}", _name, retryInitialDelayMs, _retryDelayFactor, _retryDelayJitterFactor, _maxRetries);
+            + "max retries: {}, consecutive failures threshold: {}, healthy threshold: {} (probation re-probe reuses "
+            + "the retry initial delay)", _name, retryInitialDelayMs, _retryDelayFactor, _retryDelayJitterFactor,
+        _maxRetries, _consecutiveFailuresThreshold, _healthyThreshold);
   }
 
   @Override
@@ -123,9 +143,24 @@ public abstract class BaseExponentialBackoffRetryFailureDetector implements Fail
             }
           }
           if (recovered) {
-            markServerHealthy(instanceId);
+            // Passed a health probe. Require a configurable number of consecutive successful probes (a "probation"
+            // phase) before re-admitting the server to routing. This prevents flapping when a probe transiently
+            // succeeds against a server that still cannot actually serve queries.
+            retryInfo._numConsecutiveSuccessfulProbes++;
+            if (retryInfo._numConsecutiveSuccessfulProbes >= _healthyThreshold) {
+              markServerHealthy(instanceId);
+            } else {
+              LOGGER.info("Server: {} passed health probe {}/{}, keeping it in probation before re-admitting",
+                  instanceId, retryInfo._numConsecutiveSuccessfulProbes, _healthyThreshold);
+              // Re-probe at a steady cadence (the retry initial delay) without growing the backoff, and keep the
+              // server out of routing.
+              retryInfo._retryTimeNs = System.nanoTime() + applyJitter(_retryInitialDelayNs);
+              _retryInfoDelayQueue.offer(retryInfo);
+            }
           } else {
-            // Update the retry info and add it back to the delay queue
+            // Failed probe: reset probation progress and grow the backoff so a repeatedly-failing server is retried
+            // less and less aggressively (instead of hammering it every retry interval).
+            retryInfo._numConsecutiveSuccessfulProbes = 0;
             retryInfo._retryDelayNs = (long) (retryInfo._retryDelayNs * _retryDelayFactor);
             retryInfo._retryTimeNs = System.nanoTime() + applyJitter(retryInfo._retryDelayNs);
             retryInfo._numRetries++;
@@ -145,6 +180,7 @@ public abstract class BaseExponentialBackoffRetryFailureDetector implements Fail
 
   @Override
   public void markServerHealthy(String instanceId) {
+    _consecutiveNotRespondedMap.remove(instanceId);
     _unhealthyServerRetryInfoMap.computeIfPresent(instanceId, (id, retryInfo) -> {
       LOGGER.info("Mark server: {} as healthy", instanceId);
       _brokerMetrics.setValueOfGlobalGauge(BrokerGauge.UNHEALTHY_SERVERS, _unhealthyServerRetryInfoMap.size() - 1);
@@ -155,6 +191,7 @@ public abstract class BaseExponentialBackoffRetryFailureDetector implements Fail
 
   @Override
   public void markServerUnhealthy(String instanceId) {
+    _consecutiveNotRespondedMap.remove(instanceId);
     _unhealthyServerRetryInfoMap.computeIfAbsent(instanceId, id -> {
       LOGGER.warn("Mark server: {} as unhealthy", instanceId);
       _brokerMetrics.setValueOfGlobalGauge(BrokerGauge.UNHEALTHY_SERVERS, _unhealthyServerRetryInfoMap.size() + 1);
@@ -166,8 +203,45 @@ public abstract class BaseExponentialBackoffRetryFailureDetector implements Fail
   }
 
   @Override
+  public void notifyServerResponded(String instanceId) {
+    // A successful response clears any accumulated consecutive-failure count for this server.
+    AtomicInteger counter = _consecutiveNotRespondedMap.get(instanceId);
+    if (counter != null) {
+      counter.set(0);
+    }
+  }
+
+  @Override
+  public void notifyServerNotResponded(String instanceId) {
+    if (_consecutiveFailuresThreshold <= 0) {
+      // Timeout-based detection disabled.
+      return;
+    }
+    if (_unhealthyServerRetryInfoMap.containsKey(instanceId)) {
+      // Already known unhealthy; the retry/probation loop owns its lifecycle now.
+      return;
+    }
+    int count = _consecutiveNotRespondedMap.computeIfAbsent(instanceId, id -> new AtomicInteger()).incrementAndGet();
+    if (count >= _consecutiveFailuresThreshold) {
+      LOGGER.warn("Server: {} failed to respond to {} consecutive queries (threshold: {}), marking it unhealthy",
+          instanceId, count, _consecutiveFailuresThreshold);
+      markServerUnhealthy(instanceId);
+    }
+  }
+
+  @Override
   public Set<String> getUnhealthyServers() {
     return _unhealthyServerRetryInfoMap.keySet();
+  }
+
+  @VisibleForTesting
+  void setHealthyThreshold(int healthyThreshold) {
+    _healthyThreshold = Math.max(1, healthyThreshold);
+  }
+
+  @VisibleForTesting
+  void setConsecutiveFailuresThreshold(int consecutiveFailuresThreshold) {
+    _consecutiveFailuresThreshold = consecutiveFailuresThreshold;
   }
 
   @Override
@@ -208,12 +282,16 @@ public abstract class BaseExponentialBackoffRetryFailureDetector implements Fail
     long _retryTimeNs;
     long _retryDelayNs;
     int _numRetries;
+    // Number of consecutive successful health probes accumulated during the probation phase. Reset to 0 on any
+    // failed probe. The server is only re-admitted once this reaches the configured healthy threshold.
+    int _numConsecutiveSuccessfulProbes;
 
     RetryInfo(String instanceId) {
       _instanceId = instanceId;
       _retryTimeNs = System.nanoTime() + applyJitter(_retryInitialDelayNs);
       _retryDelayNs = _retryInitialDelayNs;
       _numRetries = 0;
+      _numConsecutiveSuccessfulProbes = 0;
     }
 
     @Override

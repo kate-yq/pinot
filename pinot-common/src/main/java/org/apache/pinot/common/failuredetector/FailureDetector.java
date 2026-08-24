@@ -77,6 +77,22 @@ public interface FailureDetector {
   void markServerUnhealthy(String instanceId);
 
   /**
+   * Notifies the detector that the server responded successfully to a query. Implementations may use this to reset
+   * any consecutive-failure tracking. Default is a no-op.
+   */
+  default void notifyServerResponded(String instanceId) {
+  }
+
+  /**
+   * Notifies the detector that the server failed to respond to a query (no data table received, e.g. the query timed
+   * out while this server was still TCP-connected). Implementations may use this to proactively mark a server
+   * unhealthy after a configurable number of consecutive failures, without waiting for a transport-level event such
+   * as channelInactive. Default is a no-op.
+   */
+  default void notifyServerNotResponded(String instanceId) {
+  }
+
+  /**
    * Returns all the unhealthy servers.
    */
   Set<String> getUnhealthyServers();
