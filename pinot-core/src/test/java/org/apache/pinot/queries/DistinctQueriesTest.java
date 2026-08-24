@@ -1125,7 +1125,7 @@ public class DistinctQueriesTest extends BaseQueriesTest {
    *   <li>Selecting some columns with filter with raw MV</li>
    *   <li>Selecting some columns order by raw MV column</li>
    *   <li>Selecting some columns with filter that does not match any record with raw MV</li>
-   *   TODO: Support alias and add a test for that
+   *   <li>Alias handling is covered separately by {@link #testDistinctWithAliasInterSegment()}</li>
    * </ul>
    */
   private void testDistinctInterSegmentHelper(String[] queries) {
@@ -1531,7 +1531,7 @@ public class DistinctQueriesTest extends BaseQueriesTest {
    *   <li>Selecting some columns with filter with raw MV</li>
    *   <li>Selecting some columns order by raw MV column</li>
    *   <li>Selecting some columns with filter that does not match any record with raw MV</li>
-   *   TODO: Support alias and add a test for that
+   *   <li>Alias handling is covered separately by {@link #testDistinctWithAliasInterSegment()}</li>
    * </ul>
    */
   @Test
@@ -1583,7 +1583,7 @@ public class DistinctQueriesTest extends BaseQueriesTest {
    *   <li>Selecting some columns with filter with raw MV</li>
    *   <li>Selecting some columns order by raw MV column</li>
    *   <li>Selecting some columns with filter that does not match any record with raw MV</li>
-   *   TODO: Support alias and add a test for that
+   *   <li>Alias handling is covered separately by {@link #testDistinctWithAliasInterSegment()}</li>
    * </ul>
    */
   @Test
@@ -1623,5 +1623,176 @@ public class DistinctQueriesTest extends BaseQueriesTest {
             + "rawLongMVColumn ORDER BY rawLongMVColumn"
     });
     //@formatter:on
+  }
+
+  /**
+   * Test DISTINCT queries with column aliases across multiple segments and servers (2 servers, each with 2
+   * segments). Verifies broker/server schema alignment so that the returned data schema honors the aliases.
+   * <p>The following query types are tested:
+   * <ul>
+   *   <li>Single-column DISTINCT with an alias (ordered for determinism)</li>
+   *   <li>Multi-column DISTINCT with an alias on every column</li>
+   *   <li>DISTINCT mixing aliased and non-aliased columns, with ORDER BY and LIMIT</li>
+   * </ul>
+   */
+  @Test
+  public void testDistinctWithAliasInterSegment() {
+    // Single-column DISTINCT with an alias; ordered by the underlying column so the smallest values come first.
+    // The result schema column name must be the alias, not the underlying column name.
+    {
+      String query = "SELECT DISTINCT intColumn AS intAlias FROM testTable ORDER BY intColumn LIMIT 5";
+      ResultTable resultTable = getBrokerResponse(query).getResultTable();
+
+      DataSchema expectedDataSchema =
+          new DataSchema(new String[]{"intAlias"}, new ColumnDataType[]{ColumnDataType.INT});
+      assertEquals(resultTable.getDataSchema(), expectedDataSchema);
+
+      List<Object[]> rows = resultTable.getRows();
+      assertEquals(rows.size(), 5);
+      for (int i = 0; i < 5; i++) {
+        assertEquals(((Integer) rows.get(i)[0]).intValue(), i);
+      }
+    }
+
+    // Multi-column DISTINCT with an alias on every column; all 200 unique values should be returned.
+    {
+      String query =
+          "SELECT DISTINCT intColumn AS a, longColumn AS b, stringColumn AS c FROM testTable LIMIT 10000";
+      ResultTable resultTable = getBrokerResponse(query).getResultTable();
+
+      DataSchema expectedDataSchema = new DataSchema(new String[]{"a", "b", "c"},
+          new ColumnDataType[]{ColumnDataType.INT, ColumnDataType.LONG, ColumnDataType.STRING});
+      assertEquals(resultTable.getDataSchema(), expectedDataSchema);
+
+      List<Object[]> rows = resultTable.getRows();
+      assertEquals(rows.size(), 2 * NUM_UNIQUE_RECORDS_PER_SEGMENT);
+      Set<Integer> expectedValues = new HashSet<>();
+      for (int i = 0; i < NUM_UNIQUE_RECORDS_PER_SEGMENT; i++) {
+        expectedValues.add(i);
+        expectedValues.add(1000 + i);
+      }
+      Set<Integer> actualValues = new HashSet<>();
+      for (Object[] row : rows) {
+        int intValue = (Integer) row[0];
+        assertEquals(((Long) row[1]).intValue(), intValue);
+        assertEquals(Integer.parseInt((String) row[2]), intValue);
+        actualValues.add(intValue);
+      }
+      assertEquals(actualValues, expectedValues);
+    }
+
+    // DISTINCT mixing an aliased and a non-aliased column, ordered by the underlying column descending.
+    // Only the aliased column should be renamed in the result schema.
+    {
+      String query =
+          "SELECT DISTINCT intColumn AS intAlias, longColumn FROM testTable ORDER BY intColumn DESC LIMIT 5";
+      ResultTable resultTable = getBrokerResponse(query).getResultTable();
+
+      DataSchema expectedDataSchema = new DataSchema(new String[]{"intAlias", "longColumn"},
+          new ColumnDataType[]{ColumnDataType.INT, ColumnDataType.LONG});
+      assertEquals(resultTable.getDataSchema(), expectedDataSchema);
+
+      List<Object[]> rows = resultTable.getRows();
+      assertEquals(rows.size(), 5);
+      for (int i = 0; i < 5; i++) {
+        int expectedValue = 1000 + NUM_UNIQUE_RECORDS_PER_SEGMENT - 1 - i;
+        assertEquals(((Integer) rows.get(i)[0]).intValue(), expectedValue);
+        assertEquals(((Long) rows.get(i)[1]).intValue(), expectedValue);
+      }
+    }
+  }
+
+  /**
+   * Test DISTINCT applied on top of a transform (rather than a raw column) with aliases, across multiple segments
+   * and servers (2 servers, each with 2 segments). Verifies the broker result schema honors the alias given to the
+   * transform expression.
+   * <ul>
+   *   <li>Single transform {@code ADD(intColumn, floatColumn)} aliased, ordered by the transform</li>
+   *   <li>Transform aliased alongside a raw (non-aliased) column, with a filter for a deterministic result</li>
+   * </ul>
+   */
+  @Test
+  public void testDistinctOnTransformWithAliasInterSegment() {
+    // Single transform with an alias; ordered by the transform so the smallest sums come first.
+    // intColumn and floatColumn share the same value, so ADD(intColumn, floatColumn) == 2 * value.
+    {
+      String query = "SELECT DISTINCT ADD(intColumn, floatColumn) AS sumCol FROM testTable "
+          + "ORDER BY ADD(intColumn, floatColumn) LIMIT 5";
+      ResultTable resultTable = getBrokerResponse(query).getResultTable();
+
+      DataSchema expectedDataSchema =
+          new DataSchema(new String[]{"sumCol"}, new ColumnDataType[]{ColumnDataType.DOUBLE});
+      assertEquals(resultTable.getDataSchema(), expectedDataSchema);
+
+      List<Object[]> rows = resultTable.getRows();
+      assertEquals(rows.size(), 5);
+      for (int i = 0; i < 5; i++) {
+        assertEquals(((Double) rows.get(i)[0]).intValue(), 2 * i);
+      }
+    }
+
+    // Transform aliased alongside a raw (non-aliased) column; WHERE keeps only values [0, 5) for determinism.
+    // Only the transform column is aliased, so the raw column keeps its original schema name.
+    {
+      String query = "SELECT DISTINCT ADD(intColumn, floatColumn) AS s, stringColumn FROM testTable "
+          + "WHERE intColumn < 5 ORDER BY ADD(intColumn, floatColumn) LIMIT 10000";
+      ResultTable resultTable = getBrokerResponse(query).getResultTable();
+
+      DataSchema expectedDataSchema = new DataSchema(new String[]{"s", "stringColumn"},
+          new ColumnDataType[]{ColumnDataType.DOUBLE, ColumnDataType.STRING});
+      assertEquals(resultTable.getDataSchema(), expectedDataSchema);
+
+      List<Object[]> rows = resultTable.getRows();
+      assertEquals(rows.size(), 5);
+      for (int i = 0; i < 5; i++) {
+        assertEquals(((Double) rows.get(i)[0]).intValue(), 2 * i);
+        assertEquals(Integer.parseInt((String) rows.get(i)[1]), i);
+      }
+    }
+  }
+
+  /**
+   * Test DISTINCT where ORDER BY references the select alias (not the underlying column/expression), across
+   * multiple segments and servers (2 servers, each with 2 segments). The alias is resolved by {@code AliasApplier}
+   * before DISTINCT validation, and the broker result schema still reflects the alias.
+   * <ul>
+   *   <li>ORDER BY a plain-column alias (descending)</li>
+   *   <li>ORDER BY a transform alias (ascending)</li>
+   * </ul>
+   */
+  @Test
+  public void testDistinctOrderByAliasInterSegment() {
+    // ORDER BY a plain-column alias, descending -> largest values first.
+    {
+      String query = "SELECT DISTINCT intColumn AS intAlias FROM testTable ORDER BY intAlias DESC LIMIT 5";
+      ResultTable resultTable = getBrokerResponse(query).getResultTable();
+
+      DataSchema expectedDataSchema =
+          new DataSchema(new String[]{"intAlias"}, new ColumnDataType[]{ColumnDataType.INT});
+      assertEquals(resultTable.getDataSchema(), expectedDataSchema);
+
+      List<Object[]> rows = resultTable.getRows();
+      assertEquals(rows.size(), 5);
+      for (int i = 0; i < 5; i++) {
+        assertEquals(((Integer) rows.get(i)[0]).intValue(), 1000 + NUM_UNIQUE_RECORDS_PER_SEGMENT - 1 - i);
+      }
+    }
+
+    // ORDER BY a transform alias, ascending -> smallest sums first. ADD(intColumn, floatColumn) == 2 * value.
+    {
+      String query = "SELECT DISTINCT ADD(intColumn, floatColumn) AS sumAlias FROM testTable "
+          + "ORDER BY sumAlias LIMIT 5";
+      ResultTable resultTable = getBrokerResponse(query).getResultTable();
+
+      DataSchema expectedDataSchema =
+          new DataSchema(new String[]{"sumAlias"}, new ColumnDataType[]{ColumnDataType.DOUBLE});
+      assertEquals(resultTable.getDataSchema(), expectedDataSchema);
+
+      List<Object[]> rows = resultTable.getRows();
+      assertEquals(rows.size(), 5);
+      for (int i = 0; i < 5; i++) {
+        assertEquals(((Double) rows.get(i)[0]).intValue(), 2 * i);
+      }
+    }
   }
 }

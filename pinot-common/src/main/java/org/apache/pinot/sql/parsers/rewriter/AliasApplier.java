@@ -41,15 +41,32 @@ public class AliasApplier implements QueryRewriter {
     Map<String, Expression> aliasMap = new HashMap<>();
     for (Expression expression : selectExpressions) {
       Function function = expression.getFunctionCall();
-      if (function == null || !function.getOperator().equals("as")) {
+      if (function == null) {
         continue;
       }
-      String alias = function.getOperands().get(1).getIdentifier().getName();
-      if (aliasMap.put(alias, function.getOperands().get(0)) != null) {
-        throw new SqlCompilationException("Find duplicate alias: " + alias);
+      // For DISTINCT queries the aliased columns are nested as arguments of the distinct function
+      // (e.g. distinct(as(col, alias), ...)), so unwrap it to pick up those aliases as well. This lets the
+      // aliases be referenced in ORDER BY, consistent with non-DISTINCT queries.
+      if (function.getOperator().equals("distinct")) {
+        for (Expression distinctOperand : function.getOperands()) {
+          extractAlias(distinctOperand, aliasMap);
+        }
+        continue;
       }
+      extractAlias(expression, aliasMap);
     }
     return aliasMap;
+  }
+
+  private static void extractAlias(Expression expression, Map<String, Expression> aliasMap) {
+    Function function = expression.getFunctionCall();
+    if (function == null || !function.getOperator().equals("as")) {
+      return;
+    }
+    String alias = function.getOperands().get(1).getIdentifier().getName();
+    if (aliasMap.put(alias, function.getOperands().get(0)) != null) {
+      throw new SqlCompilationException("Find duplicate alias: " + alias);
+    }
   }
 
   private static void applyAlias(Map<String, Expression> aliasMap, PinotQuery pinotQuery) {

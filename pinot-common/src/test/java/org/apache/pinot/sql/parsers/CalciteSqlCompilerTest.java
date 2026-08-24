@@ -2958,6 +2958,32 @@ public class CalciteSqlCompilerTest {
     sql = "SELECT DISTINCT add(col1, sub(col2, 3)), mod(col2, 10), div(col4, mult(col5, 5)) FROM foo ORDER BY"
         + " add(col1, sub(col2, 3)), mod(col2, 10), div(col4, mult(col5, 5)) DESC";
     testSupportedDistinctQuery(sql);
+
+    // ORDER BY may reference a select alias for DISTINCT (resolved to the underlying column/expression).
+    sql = "SELECT DISTINCT col1 AS a, col2 FROM foo ORDER BY a";
+    testSupportedDistinctQuery(sql);
+
+    sql = "SELECT DISTINCT add(col1, sub(col2, 3)) AS s, mod(col2, 10) FROM foo ORDER BY s";
+    testSupportedDistinctQuery(sql);
+  }
+
+  /**
+   * ORDER BY referencing a select alias in a DISTINCT query should be resolved to the underlying column/expression
+   * by {@link org.apache.pinot.sql.parsers.rewriter.AliasApplier}, keeping DISTINCT consistent with other queries.
+   */
+  @Test
+  public void testDistinctOrderByAliasResolvedToUnderlyingExpression() {
+    // Plain-column alias -> underlying column.
+    PinotQuery q1 = compileToPinotQuery("SELECT DISTINCT col1 AS a, col2 FROM foo ORDER BY a");
+    Expression orderBy1 = q1.getOrderByList().get(0).getFunctionCall().getOperands().get(0);
+    Assert.assertTrue(orderBy1.isSetIdentifier());
+    Assert.assertEquals(orderBy1.getIdentifier().getName(), "col1");
+
+    // Transform alias -> underlying transform expression.
+    PinotQuery q2 = compileToPinotQuery("SELECT DISTINCT add(col1, col2) AS s FROM foo ORDER BY s");
+    Expression orderBy2 = q2.getOrderByList().get(0).getFunctionCall().getOperands().get(0);
+    Assert.assertTrue(orderBy2.isSetFunctionCall());
+    Assert.assertEquals(orderBy2.getFunctionCall().getOperator(), "add");
   }
 
   private void testUnsupportedDistinctQuery(String query, String errorMessage) {
