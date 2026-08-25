@@ -25,8 +25,10 @@ import com.google.common.collect.BiMap;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Executor;
 import javax.annotation.Nonnegative;
 import javax.annotation.Nonnull;
@@ -264,11 +266,32 @@ public class TableSizeReader {
     Map<String, List<String>> serverToSegmentsMap = _helixResourceManager.getServerToSegmentsMap(tableNameWithType,
         null, includeReplacedSegments);
     ServerTableSizeReader serverTableSizeReader = new ServerTableSizeReader(_executor, _connectionManager);
+    Set<String> serversToQuery = new HashSet<>(serverToSegmentsMap.keySet());
+    ServerQueryInfoFetcher serverQueryInfoFetcher = new ServerQueryInfoFetcher(_helixResourceManager);
+    List<String> shutdownServers = new ArrayList<>();
+    serversToQuery.removeIf(server -> {
+      try {
+        ServerQueryInfoFetcher.ServerQueryInfo serverInfo = serverQueryInfoFetcher.getServerQueryInfo(server);
+        if (serverInfo != null && serverInfo.isShutdownInProgress()) {
+          shutdownServers.add(server);
+          return true;
+        }
+      } catch (RuntimeException e) {
+        LOGGER.warn("Failed to check shutdown state for server: {} while reading size for table: {}, keeping it in "
+            + "the request set", server, tableNameWithType, e);
+      }
+      return false;
+    });
+    if (!shutdownServers.isEmpty()) {
+      Collections.sort(shutdownServers);
+      LOGGER.info("Skipping table size requests to {} shutdown servers for table: {}: {}", shutdownServers.size(),
+          tableNameWithType, shutdownServers);
+    }
     // Use bestEffort=true so that a missing InstanceConfig for one server (e.g. a decommissioned server still
     // referenced in IdealState) does not block the entire size read. Skipped servers remain in serverToSegmentsMap,
     // so the downstream estimation logic treats them identically to unresponsive servers.
     BiMap<String, String> endpoints =
-        _helixResourceManager.getDataInstanceAdminEndpoints(serverToSegmentsMap.keySet(), true);
+        _helixResourceManager.getDataInstanceAdminEndpoints(serversToQuery, true);
     Map<String, List<SegmentSizeInfo>> serverToSegmentSizeInfoListMap =
         serverTableSizeReader.getSegmentSizeInfoFromServers(endpoints, tableNameWithType, timeoutMs, retryPolicy);
 

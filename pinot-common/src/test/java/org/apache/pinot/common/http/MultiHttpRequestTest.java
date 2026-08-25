@@ -34,6 +34,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.commons.lang3.tuple.Pair;
+import org.apache.hc.client5.http.config.RequestConfig;
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.apache.pinot.spi.utils.retry.RetryPolicies;
@@ -227,6 +228,16 @@ public class MultiHttpRequestTest {
     Assert.assertEquals(result.getSuccess(), 3);
     Assert.assertEquals(result.getErrors(), 1);
     Assert.assertEquals(result.getTimeouts(), 1);
+  }
+
+  @Test
+  public void testRequestTimeoutConfiguration() {
+    int timeoutMs = 1234;
+    RequestConfig requestConfig = MultiHttpRequest.createRequestConfig(timeoutMs);
+
+    Assert.assertEquals(requestConfig.getConnectionRequestTimeout().toMilliseconds(), timeoutMs);
+    Assert.assertEquals(requestConfig.getConnectTimeout().toMilliseconds(), timeoutMs);
+    Assert.assertEquals(requestConfig.getResponseTimeout().toMilliseconds(), timeoutMs);
   }
 
   @Test

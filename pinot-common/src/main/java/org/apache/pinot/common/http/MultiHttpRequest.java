@@ -124,11 +124,7 @@ public class MultiHttpRequest {
   public <T extends HttpUriRequestBase> CompletionService<MultiHttpRequestResponse> execute(
       List<Pair<String, String>> urlsAndRequestBodies, @Nullable Map<String, String> requestHeaders, int timeoutMs,
       String httpMethodName, Function<String, T> httpRequestBaseSupplier) {
-    // Create global request configuration
-    Timeout timeout = Timeout.of(timeoutMs, TimeUnit.MILLISECONDS);
-    RequestConfig defaultRequestConfig =
-        RequestConfig.custom().setConnectionRequestTimeout(timeout).setResponseTimeout(timeout)
-            .build(); // setting the socket
+    RequestConfig defaultRequestConfig = createRequestConfig(timeoutMs);
 
     HttpClientBuilder httpClientBuilder =
         HttpClients.custom().setConnectionManager(_connectionManager).setDefaultRequestConfig(defaultRequestConfig);
@@ -185,5 +181,11 @@ public class MultiHttpRequest {
       });
     }
     return completionService;
+  }
+
+  static RequestConfig createRequestConfig(int timeoutMs) {
+    Timeout timeout = Timeout.of(timeoutMs, TimeUnit.MILLISECONDS);
+    return RequestConfig.custom().setConnectionRequestTimeout(timeout).setConnectTimeout(timeout)
+        .setResponseTimeout(timeout).build();
   }
 }

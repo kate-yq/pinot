@@ -27,15 +27,19 @@ import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
 import org.apache.hc.client5.http.io.HttpClientConnectionManager;
 import org.apache.helix.AccessOption;
+import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.store.zk.ZkHelixPropertyStore;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.pinot.common.exception.InvalidConfigException;
 import org.apache.pinot.common.metrics.ControllerGauge;
 import org.apache.pinot.common.metrics.ControllerMetrics;
@@ -50,6 +54,7 @@ import org.apache.pinot.controller.utils.FakeHttpServer;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.metrics.PinotMetricUtils;
+import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.JsonUtils;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
@@ -523,5 +528,43 @@ public class TableSizeReaderTest {
     // Total estimated = 360 + 260 + 150 + 160 = 930
     assertEquals(offlineSizes._reportedSizeInBytes, 680);
     assertEquals(offlineSizes._estimatedSizeInBytes, 930);
+  }
+
+  @Test
+  public void testGetTableSubTypeSizeSkipsShutdownServer() throws InvalidConfigException {
+    String shutdownServer = "Server_shutdown";
+    Map<String, List<String>> serverToSegmentsMap = new HashMap<>();
+    serverToSegmentsMap.put("server0", _serverMap.get("server0")._segments);
+    serverToSegmentsMap.put(shutdownServer, Arrays.asList("s2", "s3"));
+    when(_helix.getServerToSegmentsMap(anyString(), any(), anyBoolean())).thenReturn(serverToSegmentsMap);
+
+    ZNRecord shutdownServerRecord = new ZNRecord(shutdownServer);
+    shutdownServerRecord.setBooleanField(CommonConstants.Helix.IS_SHUTDOWN_IN_PROGRESS, true);
+    when(_helix.getHelixInstanceConfig(shutdownServer)).thenReturn(new InstanceConfig(shutdownServerRecord));
+
+    AtomicReference<Set<String>> requestedServers = new AtomicReference<>();
+    when(_helix.getDataInstanceAdminEndpoints(ArgumentMatchers.anySet(), ArgumentMatchers.eq(true)))
+        .thenAnswer(invocation -> {
+          Set<String> instances = invocation.getArgument(0);
+          requestedServers.set(new HashSet<>(instances));
+          return serverEndpoints("server0");
+        });
+
+    TableSizeReader reader = new TableSizeReader(_executor, _connectionManager, _controllerMetrics, _helix,
+        _leadControllerManager);
+    TableSizeReader.TableSubTypeSizeDetails sizeDetails =
+        reader.getTableSubtypeSize("offline_OFFLINE", TIMEOUT_MSEC, true);
+
+    assertEquals(requestedServers.get(), Set.of("server0"));
+    assertEquals(sizeDetails._missingSegments, 0);
+    assertEquals(sizeDetails._reportedSizeInBytes, 410);
+    assertEquals(sizeDetails._estimatedSizeInBytes, 660);
+    assertEquals(sizeDetails._reportedSizePerReplicaInBytes, 410);
+
+    TableSizeReader.SegmentSizeDetails s2Details = sizeDetails._segments.get("s2");
+    assertEquals(s2Details._reportedSizeInBytes, 120);
+    assertEquals(s2Details._estimatedSizeInBytes, 240);
+    assertEquals(s2Details._serverInfo.get(shutdownServer).getDiskSizeInBytes(),
+        TableSizeReader.DEFAULT_SIZE_WHEN_MISSING_OR_ERROR);
   }
 }
