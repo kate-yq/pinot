@@ -170,6 +170,87 @@ public class HybridClusterIntegrationTest extends BaseHybridClusterIntegrationTe
     Assert.assertNotNull(getDebugInfo("debug/routingTable/" + TableNameBuilder.REALTIME.tableNameWithType(tableName)));
   }
 
+  /**
+   * End to end coverage of {@code POST/DELETE /tables/{tableName}/timeBoundary}.
+   * <p>
+   * Setting the boundary hands the newest offline time range from the REALTIME table to the OFFLINE table, since an
+   * explicitly set boundary is used verbatim rather than held back by one time offset. The assertion that matters is
+   * therefore not that the call succeeds, but that the total row count is unchanged afterwards: if the OFFLINE table
+   * could not fully serve the range it just became responsible for, rows would go missing with no error raised.
+   */
+  @Test
+  public void testSetAndDeleteTimeBoundary()
+      throws Exception {
+    String tableName = getTableName();
+    String offlineTableName = TableNameBuilder.OFFLINE.tableNameWithType(tableName);
+    String countQuery = "SELECT COUNT(*) FROM " + tableName;
+    long expectedTotalDocs = getRowCount(countQuery);
+    Assert.assertTrue(expectedTotalDocs > 0, "Expected the hybrid table to contain rows");
+    String computedTimeBoundary = getBrokerTimeBoundary(tableName);
+    Assert.assertNotNull(computedTimeBoundary, "Expected a computed time boundary before setting an explicit one");
+    String setTimeBoundaryUrl = getControllerRequestURLBuilder().forTableTimeBoundary(tableName);
+
+    try {
+      sendPostRequest(setTimeBoundaryUrl, null);
+
+      // The boundary is persisted on the offline table's ideal state, which is how brokers pick it up.
+      IdealState idealState = _helixResourceManager.getTableIdealState(offlineTableName);
+      Assert.assertNotNull(idealState);
+      String explicitBoundary =
+          idealState.getRecord().getSimpleField(CommonConstants.IdealState.HYBRID_TABLE_TIME_BOUNDARY);
+      Assert.assertNotNull(explicitBoundary, "Expected an explicit time boundary in the ideal state");
+      Assert.assertTrue(Long.parseLong(explicitBoundary) > 0,
+          "Expected a positive time boundary, got: " + explicitBoundary);
+
+      // The explicit boundary must reach the broker, otherwise nothing about routing actually changed.
+      TestUtils.waitForCondition(aVoid -> {
+        try {
+          return !computedTimeBoundary.equals(getBrokerTimeBoundary(tableName));
+        } catch (Exception e) {
+          return false;
+        }
+      }, 60_000L, "Broker did not pick up the explicitly set time boundary");
+
+      // Rows must not go missing now that OFFLINE owns a range REALTIME no longer answers for.
+      Assert.assertEquals(getRowCount(countQuery), expectedTotalDocs,
+          "Row count changed after advancing the time boundary, so rows were silently lost");
+    } finally {
+      sendDeleteRequest(getControllerRequestURLBuilder().forTableTimeBoundary(tableName));
+    }
+
+    // Removing the explicit boundary reverts to the computed one, and results stay complete.
+    IdealState idealStateAfterDelete = _helixResourceManager.getTableIdealState(offlineTableName);
+    Assert.assertNotNull(idealStateAfterDelete);
+    Assert.assertNull(
+        idealStateAfterDelete.getRecord().getSimpleField(CommonConstants.IdealState.HYBRID_TABLE_TIME_BOUNDARY),
+        "Expected the explicit time boundary to be removed");
+    TestUtils.waitForCondition(aVoid -> {
+      try {
+        return computedTimeBoundary.equals(getBrokerTimeBoundary(tableName));
+      } catch (Exception e) {
+        return false;
+      }
+    }, 60_000L, "Broker did not revert to the computed time boundary");
+    Assert.assertEquals(getRowCount(countQuery), expectedTotalDocs);
+  }
+
+  private long getRowCount(String query)
+      throws Exception {
+    JsonNode response = postQuery(query);
+    JsonNode exceptions = response.get("exceptions");
+    Assert.assertTrue(exceptions == null || exceptions.isEmpty(),
+        "Query returned exceptions, so the result cannot be trusted: " + exceptions);
+    return response.get("resultTable").get("rows").get(0).get(0).asLong();
+  }
+
+  private String getBrokerTimeBoundary(String tableName)
+      throws Exception {
+    JsonNode debugInfo = getDebugInfo("debug/timeBoundary/" + tableName);
+    Assert.assertNotNull(debugInfo);
+    JsonNode timeValue = debugInfo.get("timeValue");
+    return timeValue == null || timeValue.isNull() ? null : timeValue.asText();
+  }
+
   @Test(dataProvider = "useBothQueryEngines")
   public void testBrokerDebugRoutingTableSQL(boolean useMultiStageQueryEngine)
       throws Exception {

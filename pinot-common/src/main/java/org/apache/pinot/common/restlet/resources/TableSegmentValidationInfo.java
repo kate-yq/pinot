@@ -24,6 +24,13 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import javax.annotation.Nullable;
 
 
+/**
+ * Result of validating the segments assigned to one server for a table.
+ * <p>
+ * The server compares its current IdealState assignments with the locally loaded segments. ONLINE segments must be
+ * loaded with the CRC recorded in ZK, while CONSUMING segments must be present. {@code maxEndTimeMs} is the maximum
+ * end time among valid ONLINE segments assigned to that server, or {@code -1} when none are assigned.
+ */
 public class TableSegmentValidationInfo {
   private final boolean _valid;
   private final String _invalidReason;

@@ -79,6 +79,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 
@@ -2134,5 +2135,52 @@ public class InstanceSelectorTest {
     expectedSelection.put(segment2, instance4);
 
     assertEquals(selectedResult.getLeft(), expectedSelection);
+  }
+
+  /**
+   * A segment that is still new is routed to instances taken from the ideal state even when they are not ONLINE in
+   * the external view, and when such an instance is picked the segment is served best effort as an optional segment.
+   * An instance that is not enabled must therefore never be selected at all, including for new segments, otherwise
+   * the segment could be dropped without any error.
+   * <p>
+   * The hybrid table time boundary API relies on exactly this property: it only ignores a server that cannot be
+   * routed to, so that advancing the boundary cannot hand a time range to OFFLINE and then silently lose rows.
+   */
+  @Test(dataProvider = "selectorType")
+  public void testDisabledInstanceIsNeverSelectedForNewSegment(String selectorType) {
+    String oldSeg = "segment0";
+    String newSeg = "segment1";
+    createSegments(ImmutableList.of(Pair.of(newSeg, _mutableClock.millis() - 100)));
+    Set<String> onlineSegments = ImmutableSet.of(oldSeg, newSeg);
+
+    String disabledInstance = "instance0";
+    String enabledInstance = "instance1";
+    // Both segments are assigned to both instances in the ideal state.
+    IdealState idealState = createIdealState(ImmutableMap.of(
+        oldSeg, ImmutableList.of(Pair.of(disabledInstance, ONLINE), Pair.of(enabledInstance, ONLINE)),
+        newSeg, ImmutableList.of(Pair.of(disabledInstance, ONLINE), Pair.of(enabledInstance, ONLINE))));
+    // The new segment has not converged in the external view yet, which is the state right after a push.
+    ExternalView externalView = createExternalView(ImmutableMap.of(
+        oldSeg, ImmutableList.of(Pair.of(disabledInstance, ONLINE), Pair.of(enabledInstance, ONLINE)),
+        newSeg, ImmutableList.of(Pair.of(enabledInstance, ONLINE))));
+
+    InstanceSelector selector = createTestInstanceSelector(selectorType);
+    // Only one of the two instances is enabled.
+    selector.init(ImmutableSet.of(enabledInstance), EMPTY_SERVER_MAP, idealState, externalView, onlineSegments);
+
+    // Sweep request ids so that every replica the selector could rotate through is covered.
+    for (int requestId = 0; requestId < 8; requestId++) {
+      InstanceSelector.SelectionResult selectionResult =
+          selector.select(_brokerRequest, Lists.newArrayList(onlineSegments), requestId);
+      assertFalse(selectionResult.getSegmentToInstanceMap().containsValue(disabledInstance),
+          "Disabled instance was selected for a required segment at requestId " + requestId);
+      assertFalse(selectionResult.getOptionalSegmentToInstanceMap().containsValue(disabledInstance),
+          "Disabled instance was selected for an optional segment at requestId " + requestId);
+      // The remaining enabled replica still serves both segments, so excluding the disabled instance loses nothing.
+      assertEquals(selectionResult.getSegmentToInstanceMap(),
+          ImmutableMap.of(oldSeg, enabledInstance, newSeg, enabledInstance),
+          "Unexpected selection at requestId " + requestId);
+      assertTrue(selectionResult.getUnavailableSegments().isEmpty());
+    }
   }
 }

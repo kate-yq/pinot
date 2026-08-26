@@ -81,7 +81,6 @@ import org.apache.pinot.common.metadata.controllerjob.ControllerJobType;
 import org.apache.pinot.common.metrics.ControllerMeter;
 import org.apache.pinot.common.metrics.ControllerMetrics;
 import org.apache.pinot.common.response.server.TableIndexMetadataResponse;
-import org.apache.pinot.common.restlet.resources.TableSegmentValidationInfo;
 import org.apache.pinot.common.restlet.resources.ValidDocIdsType;
 import org.apache.pinot.common.utils.DatabaseUtils;
 import org.apache.pinot.common.utils.LogicalTableConfigUtils;
@@ -1145,11 +1144,26 @@ public class PinotTableRestletResource {
     return result;
   }
 
+  /**
+   * Sets an explicit query time boundary for a hybrid table, from the maximum end time across the offline segments.
+   * <p>
+   * Note that this <b>advances</b> the boundary rather than pinning it where the default would sit. A computed
+   * boundary is {@code maxEndTimeMs - timeOffsetMs}, i.e. it holds back roughly one push interval so the most
+   * recent offline data keeps being served by the realtime table. An explicitly set boundary is used verbatim (see
+   * {@code TimeBoundaryManager#updateTimeBoundaryInfo}), so calling this hands the newest pushed time range over to
+   * the offline table. That is what makes it useful after a batch push, and it is why servers are asked to confirm
+   * their segments are loaded first: once the boundary moves, the realtime table no longer answers for that range,
+   * so anything missing on the offline side is silently absent from results rather than merely stale.
+   */
   @POST
   @Path("tables/{tableName}/timeBoundary")
   @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.UPDATE_TABLE_CONFIG)
-  @ApiOperation(value = "Set hybrid table query time boundary based on offline segments' metadata", notes = "Set "
-      + "hybrid table query time boundary based on offline segments' metadata")
+  @ApiOperation(value = "Set hybrid table query time boundary based on offline segments' metadata",
+      notes = "Sets the hybrid table query time boundary to the max end time of the offline segments. This advances "
+          + "the boundary rather than pinning it: a computed boundary holds back one time offset, while an "
+          + "explicitly set one is used verbatim, so the newest pushed time range is served by the OFFLINE table "
+          + "instead of the REALTIME table. The controller verifies complete ONLINE/CONSUMING coverage before "
+          + "advancing the boundary, ignoring only replicas that brokers cannot route to.")
   @Produces(MediaType.APPLICATION_JSON)
   public SuccessResponse setTimeBoundary(
       @ApiParam(value = "Name of the hybrid table (without type suffix)", required = true) @PathParam("tableName")
@@ -1164,7 +1178,10 @@ public class PinotTableRestletResource {
 
     // Call all servers to validate all segments loaded and return the time boundary (max end time of all segments)
     String offlineTableName = TableNameBuilder.OFFLINE.tableNameWithType(tableName);
-    long timeBoundaryMs = validateSegmentStateForTable(offlineTableName);
+    HybridTimeBoundaryValidator.ValidationOutcome validationOutcome =
+        new HybridTimeBoundaryValidator(_pinotHelixResourceManager, _executor, _connectionManager)
+            .validate(offlineTableName);
+    long timeBoundaryMs = validationOutcome.getMaxEndTimeMs();
     if (timeBoundaryMs < 0) {
       throw new ControllerApplicationException(LOGGER,
           "No segments found for offline table : " + offlineTableName + ". Could not update time boundary.",
@@ -1173,11 +1190,7 @@ public class PinotTableRestletResource {
 
     // Set the timeBoundary in tableIdealState
     IdealState idealState =
-        HelixHelper.updateIdealState(_pinotHelixResourceManager.getHelixZkManager(), offlineTableName, is -> {
-          is.getRecord()
-              .setSimpleField(CommonConstants.IdealState.HYBRID_TABLE_TIME_BOUNDARY, Long.toString(timeBoundaryMs));
-          return is;
-        }, RetryPolicies.exponentialBackoffRetryPolicy(5, 1000L, 1.2f));
+        validationOutcome.updateIdealState(_pinotHelixResourceManager.getHelixZkManager(), offlineTableName);
 
     if (idealState == null) {
       throw new ControllerApplicationException(LOGGER, "Could not update time boundary",
@@ -1187,10 +1200,15 @@ public class PinotTableRestletResource {
     return new SuccessResponse("Time boundary successfully updated to: " + timeBoundaryMs);
   }
 
+  /**
+   * Removes an explicitly set time boundary, so the table reverts to the computed boundary
+   * ({@code maxEndTimeMs - timeOffsetMs}), which holds back roughly one push interval.
+   */
   @DELETE
   @Path("tables/{tableName}/timeBoundary")
   @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.DELETE_TIME_BOUNDARY)
-  @ApiOperation(value = "Delete hybrid table query time boundary", notes = "Delete hybrid table query time boundary")
+  @ApiOperation(value = "Delete hybrid table query time boundary",
+      notes = "Removes the explicitly set hybrid table query time boundary, reverting to the computed boundary")
   @Produces(MediaType.APPLICATION_JSON)
   public SuccessResponse deleteTimeBoundary(
       @ApiParam(value = "Name of the hybrid table (without type suffix)", required = true) @PathParam("tableName")
@@ -1215,44 +1233,6 @@ public class PinotTableRestletResource {
     }
 
     return new SuccessResponse("Time boundary successfully removed");
-  }
-
-  private long validateSegmentStateForTable(String offlineTableName)
-      throws InvalidConfigException, JsonProcessingException {
-    // Call all servers to validate offline table state
-    Map<String, List<String>> serverToSegments = _pinotHelixResourceManager.getServerToSegmentsMap(offlineTableName);
-    BiMap<String, String> serverEndPoints =
-        _pinotHelixResourceManager.getDataInstanceAdminEndpoints(serverToSegments.keySet());
-    CompletionServiceHelper completionServiceHelper =
-        new CompletionServiceHelper(_executor, _connectionManager, serverEndPoints);
-    List<String> serverUrls = new ArrayList<>();
-    BiMap<String, String> endpointsToServers = serverEndPoints.inverse();
-    for (String endpoint : endpointsToServers.keySet()) {
-      String reloadTaskStatusEndpoint = endpoint + "/tables/" + offlineTableName + "/allSegmentsLoaded";
-      serverUrls.add(reloadTaskStatusEndpoint);
-    }
-
-    CompletionServiceHelper.CompletionServiceResponse serviceResponse =
-        completionServiceHelper.doMultiGetRequest(serverUrls, null, true, 10000);
-
-    if (serviceResponse._failedResponseCount > 0) {
-      throw new ControllerApplicationException(LOGGER, "Could not validate table segment status",
-          Response.Status.SERVICE_UNAVAILABLE);
-    }
-
-    long timeBoundaryMs = -1;
-    // Validate all responses
-    for (String response : serviceResponse._httpResponses.values()) {
-      TableSegmentValidationInfo tableSegmentValidationInfo =
-          JsonUtils.stringToObject(response, TableSegmentValidationInfo.class);
-      if (!tableSegmentValidationInfo.isValid()) {
-        String error = "Table segment validation failed. error=" + tableSegmentValidationInfo.getInvalidReason();
-        throw new ControllerApplicationException(LOGGER, error, Response.Status.PRECONDITION_FAILED);
-      }
-      timeBoundaryMs = Math.max(timeBoundaryMs, tableSegmentValidationInfo.getMaxEndTimeMs());
-    }
-
-    return timeBoundaryMs;
   }
 
   /**

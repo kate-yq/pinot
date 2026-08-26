@@ -22,6 +22,12 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.List;
 
 
+/**
+ * JSON wrapper for a list of segment names.
+ * <p>
+ * Used as the response from the server API that lists segments hosted for a table, and as the request body for APIs
+ * that operate on a selected set of segments, such as valid-doc-ID metadata lookup.
+ */
 public class TableSegments {
   private final List<String> _segments;
 

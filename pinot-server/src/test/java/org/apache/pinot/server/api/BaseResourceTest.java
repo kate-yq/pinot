@@ -93,6 +93,8 @@ public abstract class BaseResourceTest {
   protected AdminApiApplication _adminApiApplication;
   protected WebTarget _webTarget;
   protected String _instanceId;
+  // Exposed so that tests can stub Helix interactions, e.g. the ideal state and segment ZK metadata.
+  protected HelixManager _helixManager;
 
   @SuppressWarnings("SuspiciousMethodCalls")
   @BeforeClass
@@ -118,7 +120,8 @@ public abstract class BaseResourceTest {
     when(serverInstance.getInstanceDataManager()).thenReturn(instanceDataManager);
     when(serverInstance.getInstanceDataManager().getSegmentFileDirectory()).thenReturn(
         FileUtils.getTempDirectoryPath());
-    when(serverInstance.getHelixManager()).thenReturn(mock(HelixManager.class));
+    _helixManager = mock(HelixManager.class);
+    when(serverInstance.getHelixManager()).thenReturn(_helixManager);
 
     // Mock the segment uploader
     SegmentUploader segmentUploader = mock(SegmentUploader.class);
