@@ -40,6 +40,7 @@ public abstract class BaseOnHeapMutableDictionary implements MutableDictionary {
   private final Map<Object, Integer> _valueToDictId = new ConcurrentHashMap<>(INITIAL_DICTIONARY_SIZE);
   private final Object[][] _dictIdToValue = new Object[INITIAL_DICTIONARY_SIZE][];
   private volatile int _entriesIndexed = 0;
+  private volatile long _onHeapSizeEstimateBytes = 0;
 
   /**
    * For performance, we don't validate the dictId passed in. It should be returned by index() or indexOf().
@@ -47,6 +48,11 @@ public abstract class BaseOnHeapMutableDictionary implements MutableDictionary {
   @Override
   public Object get(int dictId) {
     return _dictIdToValue[dictId >>> SHIFT_OFFSET][dictId & MASK];
+  }
+
+  @Override
+  public long getOnHeapSizeEstimateBytes() {
+    return _onHeapSizeEstimateBytes;
   }
 
   @Override
@@ -84,6 +90,8 @@ public abstract class BaseOnHeapMutableDictionary implements MutableDictionary {
       _dictIdToValue[arrayIndex][arrayOffset] = value;
       _valueToDictId.put(value, newValueDictId);
 
+      _onHeapSizeEstimateBytes +=
+          DictionaryHeapSizeEstimator.MAP_ENTRY_OVERHEAD_BYTES + DictionaryHeapSizeEstimator.estimateValueSize(value);
       _entriesIndexed = newValueDictId + 1;
       return newValueDictId;
     }

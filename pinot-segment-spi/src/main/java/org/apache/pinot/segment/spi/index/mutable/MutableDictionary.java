@@ -27,6 +27,13 @@ import org.apache.pinot.segment.spi.index.reader.Dictionary;
 public interface MutableDictionary extends Dictionary {
 
   /**
+   * Returns an estimate of the JVM heap bytes retained by this dictionary. Off-heap/mmap memory is not included.
+   */
+  default long getOnHeapSizeEstimateBytes() {
+    return 0;
+  }
+
+  /**
    * Indexes a single-value entry (a value of the dictionary type) into the dictionary, and returns the dictId of the
    * value.
    */

@@ -416,6 +416,18 @@ public abstract class BaseOffHeapMutableDictionary implements MutableDictionary 
     return newValueDictId;
   }
 
+  /**
+   * Only the (bounded) overflow hash map lives on heap; the main reverse map and the forward map are off-heap.
+   */
+  @Override
+  public long getOnHeapSizeEstimateBytes() {
+    long size = 0;
+    for (Object value : _valueToDict.getOverflowMap().keySet()) {
+      size += DictionaryHeapSizeEstimator.MAP_ENTRY_OVERHEAD_BYTES + DictionaryHeapSizeEstimator.estimateValueSize(value);
+    }
+    return size;
+  }
+
   protected long getOffHeapMemUsed() {
     ValueToDictId valueToDictId = _valueToDict;
     long size = 0;

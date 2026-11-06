@@ -1132,6 +1132,9 @@ public class MutableSegmentImpl implements MutableSegment {
   public long getOnHeapIndexSizeEstimateBytes() {
     long size = 0;
     for (IndexContainer indexContainer : _indexContainerMap.values()) {
+      if (indexContainer._dictionary != null) {
+        size += indexContainer._dictionary.getOnHeapSizeEstimateBytes();
+      }
       if (indexContainer._nullValueVector != null) {
         size += indexContainer._nullValueVector.getOnHeapSizeEstimateBytes();
       }

@@ -18,6 +18,9 @@
  */
 package org.apache.pinot.segment.local.realtime.impl.invertedindex;
 
+import org.apache.pinot.segment.local.io.writer.impl.DirectMemoryManager;
+import org.apache.pinot.segment.local.realtime.impl.dictionary.IntOffHeapMutableDictionary;
+import org.apache.pinot.segment.local.realtime.impl.dictionary.StringOnHeapMutableDictionary;
 import org.apache.pinot.segment.local.realtime.impl.nullvalue.MutableNullValueVector;
 import org.testng.annotations.Test;
 
@@ -55,5 +58,32 @@ public class RealtimeInvertedIndexSizeTest {
       nullVector.setNull(docId);
     }
     assertTrue(nullVector.getOnHeapSizeEstimateBytes() > emptySize);
+  }
+
+  @Test
+  public void testOnHeapDictionarySize()
+      throws Exception {
+    try (StringOnHeapMutableDictionary dictionary = new StringOnHeapMutableDictionary()) {
+      assertEquals(dictionary.getOnHeapSizeEstimateBytes(), 0);
+      dictionary.index("short");
+      long oneValue = dictionary.getOnHeapSizeEstimateBytes();
+      assertTrue(oneValue > 0);
+      dictionary.index("short");
+      assertEquals(dictionary.getOnHeapSizeEstimateBytes(), oneValue);
+      dictionary.index("a considerably longer dictionary value");
+      assertTrue(dictionary.getOnHeapSizeEstimateBytes() > 2 * oneValue);
+    }
+  }
+
+  @Test
+  public void testOffHeapDictionaryOnlyCountsOverflow()
+      throws Exception {
+    try (DirectMemoryManager memoryManager = new DirectMemoryManager("test");
+        IntOffHeapMutableDictionary dictionary = new IntOffHeapMutableDictionary(100, 0, memoryManager, "col")) {
+      for (int i = 0; i < 50; i++) {
+        dictionary.index(i);
+      }
+      assertEquals(dictionary.getOnHeapSizeEstimateBytes(), 0);
+    }
   }
 }
