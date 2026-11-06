@@ -70,6 +70,14 @@ public interface MutableIndex extends IndexReader {
   }
 
   /**
+   * Returns an estimate of the JVM heap bytes retained by this index. Memory held in off-heap or mmap buffers must not
+   * be included. Indexes that keep their data on heap should override this.
+   */
+  default long getOnHeapSizeEstimateBytes() {
+    return 0;
+  }
+
+  /**
    * Returns a boolean denoting whether the mutable index can consume any more rows or not.
    */
   default boolean canAddMore() {

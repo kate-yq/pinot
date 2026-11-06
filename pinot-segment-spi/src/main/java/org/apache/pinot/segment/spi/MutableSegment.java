@@ -45,6 +45,14 @@ public interface MutableSegment extends IndexSegment {
   int getNumDocsIndexed();
 
   /**
+   * Returns an estimate of the JVM heap bytes retained by the on-heap index structures of this segment (e.g. bitmap
+   * based indexes). Off-heap, direct and mmap memory is not included.
+   */
+  default long getOnHeapIndexSizeEstimateBytes() {
+    return 0;
+  }
+
+  /**
    * Returns the consumer dir containing any segment files.
    */
   File getConsumerDir();

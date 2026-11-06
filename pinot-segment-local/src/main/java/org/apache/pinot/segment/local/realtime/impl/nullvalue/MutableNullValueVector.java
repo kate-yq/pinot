@@ -41,6 +41,10 @@ public class MutableNullValueVector implements NullValueVectorReader {
     return _nullBitmap.contains(docId);
   }
 
+  public long getOnHeapSizeEstimateBytes() {
+    return _nullBitmap.getSizeInBytes();
+  }
+
   @Override
   public ImmutableRoaringBitmap getNullBitmap() {
     return _nullBitmap.getMutableRoaringBitmap();

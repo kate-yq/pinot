@@ -162,6 +162,8 @@ public class RealtimeTableDataManager extends BaseTableDataManager {
     // Tracks ingestion delay of all partitions being served for this table
     _ingestionDelayTracker =
         new IngestionDelayTracker(_serverMetrics, _tableNameWithType, this, _isServerReadyToServeQueries);
+    _serverMetrics.setOrUpdateTableGauge(_tableNameWithType, ServerGauge.REALTIME_ONHEAP_INDEX_MEMORY_ESTIMATE,
+        this::getConsumingSegmentsOnHeapIndexSizeEstimateBytes);
     File statsFile = new File(_tableDataDir, STATS_FILE_NAME);
     try {
       _statsHistory = RealtimeSegmentStatsHistory.deserialzeFrom(statsFile);
@@ -256,11 +258,29 @@ public class RealtimeTableDataManager extends BaseTableDataManager {
   protected void doStart() {
   }
 
+  @VisibleForTesting
+  long getConsumingSegmentsOnHeapIndexSizeEstimateBytes() {
+    long size = 0;
+    for (SegmentDataManager segmentDataManager : acquireAllSegments()) {
+      try {
+        if (segmentDataManager instanceof RealtimeSegmentDataManager) {
+          size += ((RealtimeSegmentDataManager) segmentDataManager).getSegment().getOnHeapIndexSizeEstimateBytes();
+        }
+      } catch (Exception e) {
+        _logger.warn("Failed to estimate on-heap index size for segment: {}", segmentDataManager.getSegmentName(), e);
+      } finally {
+        releaseSegment(segmentDataManager);
+      }
+    }
+    return size;
+  }
+
   @Override
   protected void doShutdown() {
     // Make sure we do metric cleanup when we shut down the table.
     // Do this first, so we do not show ingestion lag during shutdown.
     _ingestionDelayTracker.shutdown();
+    _serverMetrics.removeTableGauge(_tableNameWithType, ServerGauge.REALTIME_ONHEAP_INDEX_MEMORY_ESTIMATE);
     if (_tableUpsertMetadataManager != null || _tableDedupMetadataManager != null) {
       // Stop the upsert metadata manager first to prevent removing metadata when destroying segments
       if (_tableUpsertMetadataManager != null) {

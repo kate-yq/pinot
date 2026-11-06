@@ -81,6 +81,20 @@ public class RealtimeInvertedIndex implements MutableInvertedIndex {
   }
 
   @Override
+  public long getOnHeapSizeEstimateBytes() {
+    long size = 0;
+    try {
+      _readLock.lock();
+      for (ThreadSafeMutableRoaringBitmap bitmap : _bitmaps) {
+        size += bitmap.getSizeInBytes();
+      }
+    } finally {
+      _readLock.unlock();
+    }
+    return size;
+  }
+
+  @Override
   public void close() {
   }
 }

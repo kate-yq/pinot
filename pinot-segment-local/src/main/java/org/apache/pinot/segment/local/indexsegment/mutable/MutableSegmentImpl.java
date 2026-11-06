@@ -1129,6 +1129,20 @@ public class MutableSegmentImpl implements MutableSegment {
   }
 
   @Override
+  public long getOnHeapIndexSizeEstimateBytes() {
+    long size = 0;
+    for (IndexContainer indexContainer : _indexContainerMap.values()) {
+      if (indexContainer._nullValueVector != null) {
+        size += indexContainer._nullValueVector.getOnHeapSizeEstimateBytes();
+      }
+      for (MutableIndex mutableIndex : indexContainer._mutableIndexes.values()) {
+        size += mutableIndex.getOnHeapSizeEstimateBytes();
+      }
+    }
+    return size;
+  }
+
+  @Override
   public void offload() {
     if (_partitionUpsertMetadataManager != null) {
       _partitionUpsertMetadataManager.removeSegment(this);

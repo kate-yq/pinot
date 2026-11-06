@@ -57,6 +57,13 @@ public class ThreadSafeMutableRoaringBitmap {
     _mutableRoaringBitmap.add(newDocId);
   }
 
+  /**
+   * Returns the approximate heap size of the bitmap in bytes, without cloning it.
+   */
+  public synchronized long getSizeInBytes() {
+    return _mutableRoaringBitmap.getSizeInBytes();
+  }
+
   public synchronized MutableRoaringBitmap getMutableRoaringBitmap() {
     return _mutableRoaringBitmap.clone();
   }

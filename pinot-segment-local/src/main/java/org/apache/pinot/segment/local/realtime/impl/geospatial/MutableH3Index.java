@@ -92,6 +92,15 @@ public class MutableH3Index implements H3IndexReader, MutableIndex {
   }
 
   @Override
+  public long getOnHeapSizeEstimateBytes() {
+    long size = 0;
+    for (ThreadSafeMutableRoaringBitmap bitmap : _bitmaps.values()) {
+      size += bitmap.getSizeInBytes();
+    }
+    return size;
+  }
+
+  @Override
   public void close() {
   }
 }

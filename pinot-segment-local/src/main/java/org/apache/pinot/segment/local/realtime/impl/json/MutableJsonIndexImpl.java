@@ -767,6 +767,16 @@ public class MutableJsonIndexImpl implements MutableJsonIndex {
   }
 
   @Override
+  public long getOnHeapSizeEstimateBytes() {
+    try {
+      _readLock.lock();
+      return _bytesSize;
+    } finally {
+      _readLock.unlock();
+    }
+  }
+
+  @Override
   public boolean canAddMore() {
     return _bytesSize < _maxBytesSize;
   }

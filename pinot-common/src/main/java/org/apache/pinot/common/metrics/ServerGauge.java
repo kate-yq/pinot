@@ -38,6 +38,9 @@ public enum ServerGauge implements AbstractMetrics.Gauge {
   LAST_REALTIME_SEGMENT_CATCHUP_DURATION_SECONDS("seconds", false),
   LAST_REALTIME_SEGMENT_COMPLETION_DURATION_SECONDS("seconds", false),
   REALTIME_OFFHEAP_MEMORY_USED("bytes", false),
+  // Estimated JVM heap retained by the on-heap index structures (bitmap based indexes, JSON index) of all consuming
+  // segments of a table on this server. Excludes off-heap/mmap memory, upsert/dedup metadata and on-heap dictionaries.
+  REALTIME_ONHEAP_INDEX_MEMORY_ESTIMATE("bytes", false),
   REALTIME_MERGED_TEXT_IDX_DOCUMENT_AVG_LEN("bytes", false),
   REALTIME_SEGMENT_NUM_PARTITIONS("realtimeSegmentNumPartitions", false),
   LLC_SIMULTANEOUS_SEGMENT_BUILDS("llcSimultaneousSegmentBuilds", true),
